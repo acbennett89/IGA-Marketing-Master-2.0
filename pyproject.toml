@@ -19,8 +19,11 @@ dependencies = [
     "pypdf",
     "keyring",
     "platformdirs",
-    "pywin32",
+    "psutil>=5.9",
 ]
+
+[project.optional-dependencies]
+test = ["pytest>=8"]
 
 [project.scripts]
 iga-marketing-master-2 = "iga_marketing_master_2.cli:main"

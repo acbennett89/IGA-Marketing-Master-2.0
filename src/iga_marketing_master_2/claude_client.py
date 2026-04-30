@@ -1,20 +1,1212 @@
-"""claude_client.py — Anthropic SDK wrapper.
+"""claude_client.py - Anthropic SDK wrapper for IGA Marketing Master 2.0.
 
 Owns all Claude API interaction:
+
 - Default model: Sonnet 4.6. Auto-escalation to Opus 4.7 per-field on
-  `confidence < 0.7` OR `needs_review` OR required-field-missing.
-- Tool use (single `record_extracted_field` tool with `domain_tag` enum
+  ``confidence < CONFIDENCE_LOW_THRESHOLD`` OR ``needs_review`` OR
+  required-field-missing.
+- Tool use (single ``record_extracted_field`` tool with ``domain_tag`` enum
   regenerated per call from the live Field Map). Not JSON mode.
 - Two prompt-cache breakpoints: stable system+glossary+examples, then
   Field Map.
-- PDF document blocks with pagecount/size preflight (handled in `extract.py`).
-- Exponential-backoff retry on rate limit / outage; surfaces operator-readable
-  errors to the GUI.
+- PDF document blocks with pagecount/size preflight; auto-split at 80-page
+  boundaries with 1-page overlap.
+- Exponential-backoff retry on rate limit / transient outage; surfaces
+  operator-readable errors to the GUI.
+- Cache verification (Amendment #17): logs ``cache_creation_input_tokens``
+  and ``cache_read_input_tokens`` from every response. Warns if both are
+  zero on a request that should have cached. Field Map churn is documented
+  as a known cause of cache misses (Amendment #4).
 
-Cache verification (Amendment #17): logs `cache_creation_input_tokens` and
-`cache_read_input_tokens` from every response. Warns if both are zero on a
-request that should have cached. Field Map churn is documented as a known
-cause of cache misses (Amendment #4).
+SDK pin: ``anthropic>=0.42`` (post-Sonnet-4.6 SDK).
+Verified against ``anthropic==0.97.0``: ``Message.usage.cache_creation_input_tokens``
+and ``Message.usage.cache_read_input_tokens`` exist as the documented
+attribute names. See DECISION-MAP-claude-client-agent.md for details.
 """
 
-# TODO: implementation pending
+from __future__ import annotations
+
+import base64
+import dataclasses
+import hashlib
+import io
+import json
+import logging
+import time
+from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Protocol, runtime_checkable
+
+import anthropic
+import pypdf
+
+from . import field_map as field_map_mod  # FieldMap protocol satisfied by field_map module
+from . import secret_store
+
+__all__ = [
+    "CONFIDENCE_LOW_THRESHOLD",
+    "MAX_PAGES_PER_CALL",
+    "MAX_BYTES_PER_CALL",
+    "PAGE_OVERLAP",
+    "DEFAULT_SONNET_MODEL",
+    "DEFAULT_OPUS_MODEL",
+    "RETRY_BACKOFF_SECONDS",
+    "MAX_TOKENS_PER_CALL",
+    "ExtractedField",
+    "ClaudeError",
+    "ClaudeAuthError",
+    "ClaudeRateLimitError",
+    "ClaudeServerError",
+    "ClaudePDFTooLargeError",
+    "ClaudeCacheMissError",
+    "FieldMap",
+    "extract_from_pdf",
+    "reextract_low_confidence_fields",
+    "build_record_field_tool_schema",
+]
+
+# ----- Module-level constants (per ARCHITECTURE.md Appendix A) ----------------
+
+CONFIDENCE_LOW_THRESHOLD: float = 0.7
+MAX_PAGES_PER_CALL: int = 80
+MAX_BYTES_PER_CALL: int = 32 * 1024 * 1024  # Anthropic 32 MB ceiling
+PAGE_OVERLAP: int = 1
+DEFAULT_SONNET_MODEL: str = "claude-sonnet-4-6"
+DEFAULT_OPUS_MODEL: str = "claude-opus-4-7"
+RETRY_BACKOFF_SECONDS: tuple[int, ...] = (1, 2, 4, 8)
+MAX_TOKENS_PER_CALL: int = 16_384
+
+# Sonnet 4.6 cache breakpoint minimum (RESEARCH.md Finding 5)
+SONNET_CACHE_MIN_TOKENS: int = 2_048
+
+# Heuristic for breakpoint sizing warnings (chars per token)
+_CHARS_PER_TOKEN_HEURISTIC: int = 4
+
+logger = logging.getLogger("iga.claude")
+
+
+# ----- Exception hierarchy (per ARCHITECTURE.md §6.8) -------------------------
+
+
+class ClaudeError(Exception):
+    """Base exception for the Claude integration."""
+
+
+class ClaudeAuthError(ClaudeError):
+    """401/403 from Anthropic. Surface to operator for re-prompt."""
+
+
+class ClaudeRateLimitError(ClaudeError):
+    """429 from Anthropic. Caller may retry with backoff."""
+
+
+class ClaudeServerError(ClaudeError):
+    """5xx from Anthropic. Caller may retry."""
+
+
+class ClaudePDFTooLargeError(ClaudeError):
+    """Caught and resolved internally via split. Should not escape extract_from_pdf."""
+
+
+class ClaudeCacheMissError(ClaudeError):
+    """NEVER raised; cache miss is a warning, not an error.
+
+    Reserved for symmetry with ARCHITECTURE.md §6.8.
+    """
+
+
+# ----- Public dataclass -------------------------------------------------------
+
+
+@dataclass(slots=True, kw_only=True)
+class ExtractedField:
+    """One extracted insurance field, returned by the Extractor."""
+
+    domain_tag: str
+    value: str | int | float | bool | None
+    source_doc: str
+    source_page: int
+    source_quote: str
+    confidence: float
+    needs_review: bool = False
+    repeatable_group: str | None = None
+    repeatable_index: int | None = None
+    model_used: str = DEFAULT_SONNET_MODEL
+
+
+# ----- FieldMap protocol ------------------------------------------------------
+
+
+@runtime_checkable
+class FieldMap(Protocol):
+    """Structural protocol for FieldMap.
+
+    The real implementation lives in ``field_map.py`` and is not yet
+    available; this Protocol defines the surface ``claude_client`` requires
+    so the module can be loaded and tested independently.
+    """
+
+    def generate_domain_tag_enum(self) -> list[str]: ...
+
+    def lookup_by_domain_tag(self, domain_tag: str) -> Any | None: ...
+
+
+# A few-shot/example payload type alias
+SystemPromptPart = Mapping[str, Any]
+
+
+# ----- Tool schema build (per ARCHITECTURE.md §6.2) ---------------------------
+
+
+def build_record_field_tool_schema(field_map: FieldMap) -> dict[str, Any]:
+    """Build the ``record_extracted_field`` tool input schema.
+
+    The ``domain_tag`` enum is regenerated per call from the live Field Map.
+    If the Field Map has no populated ``domain_tag`` values yet (early v1),
+    the enum constraint is omitted and the tag is free-text. The Extractor
+    is responsible for queuing every recorded tag for JIT confirmation in
+    that case.
+    """
+    enum_values = sorted(_safe_generate_domain_tag_enum(field_map))
+    domain_tag_property: dict[str, Any] = {"type": "string"}
+    # Bootstrapping case: a fresh Field Map has no tags yet. Letting Claude
+    # invent strings (which we then queue for human confirmation) is the only
+    # way to get the system off the ground without a hand-written tag list.
+    if enum_values:
+        domain_tag_property["enum"] = enum_values
+    return {
+        "name": "record_extracted_field",
+        "description": (
+            "Record one extracted insurance field, keyed by its domain_tag. "
+            "Call this tool once per discrete field you find in the PDF. "
+            "If the same field appears multiple times in a repeatable group "
+            "(e.g., a vehicle schedule), call it once per group item with "
+            "repeatable_group and repeatable_index set."
+        ),
+        "input_schema": {
+            "type": "object",
+            "required": [
+                "domain_tag",
+                "value",
+                "source_doc",
+                "source_page",
+                "source_quote",
+                "confidence",
+            ],
+            "properties": {
+                "domain_tag": domain_tag_property,
+                "value": {"type": ["string", "number", "boolean", "null"]},
+                "source_doc": {"type": "string"},
+                "source_page": {"type": "integer", "minimum": 1},
+                "source_quote": {"type": "string"},
+                "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+                "needs_review": {"type": "boolean"},
+                "repeatable_group": {"type": "string"},
+                "repeatable_index": {"type": "integer", "minimum": 0},
+            },
+            "additionalProperties": False,
+        },
+    }
+
+
+def _safe_generate_domain_tag_enum(field_map: FieldMap) -> list[str]:
+    """Call ``field_map.generate_domain_tag_enum()`` defensively.
+
+    The Field Map module is owned by another agent and may not be loaded
+    in unit tests. Falls back to an empty enum (free-text mode) on any
+    failure.
+    """
+    try:
+        result = field_map.generate_domain_tag_enum()
+        if result is None:
+            return []
+        return [str(t) for t in result]
+    except Exception:  # pragma: no cover - defensive
+        logger.warning(
+            "field_map.generate_domain_tag_enum failed; using free-text domain_tag",
+            exc_info=True,
+        )
+        return []
+
+
+# ----- Field Map prompt block ------------------------------------------------
+
+
+def _serialize_field_map_for_prompt(field_map: FieldMap) -> str:
+    """Render the Field Map as a stable text block for the second cache breakpoint.
+
+    The block is the JSON-encoded enum plus any ``notes_for_claude``
+    interpolations the Field Map exposes. We use the enum as the canonical
+    representation because it is what the tool schema enforces; the full
+    field-by-field hint set (including ``notes_for_claude`` strings) is
+    appended when the FieldMap exposes it via ``field_map_mod`` helpers.
+    """
+    enum_values = _safe_generate_domain_tag_enum(field_map)
+    parts: list[str] = []
+    parts.append("=== FIELD MAP — domain_tag enum (sorted) ===")
+    if enum_values:
+        # One per line for caching stability across small enum changes.
+        parts.extend(enum_values)
+    else:
+        parts.append("(empty — free-text domain_tag accepted; JIT enrichment will follow)")
+
+    # Optional: pull notes_for_claude when the field_map module exposes a
+    # public traversal helper. This keeps claude_client decoupled — if the
+    # helper isn't present, we just skip the notes block.
+    notes_block = _collect_notes_for_claude(field_map)
+    if notes_block:
+        parts.append("")
+        parts.append("=== FIELD MAP — notes_for_claude ===")
+        parts.append(notes_block)
+
+    return "\n".join(parts)
+
+
+def _collect_notes_for_claude(field_map: FieldMap) -> str:
+    """Pull ``notes_for_claude`` from the Field Map if available.
+
+    Returns an empty string when the Field Map doesn't expose a helper or
+    a module-level ``iter_notes_for_claude(field_map)`` function isn't
+    present. This keeps caching deterministic and avoids accidental
+    coupling to a Field Map implementation that hasn't shipped yet.
+    """
+    notes: Iterable[tuple[str, str]] | None = None
+    instance_helper = getattr(field_map, "iter_notes_for_claude", None)
+    if callable(instance_helper):
+        try:
+            notes = list(instance_helper())
+        except Exception:  # pragma: no cover - defensive
+            notes = None
+    if notes is None:
+        module_helper = getattr(field_map_mod, "iter_notes_for_claude", None)
+        if callable(module_helper):
+            try:
+                notes = list(module_helper(field_map))
+            except Exception:  # pragma: no cover - defensive
+                notes = None
+    if not notes:
+        return ""
+    rendered: list[str] = []
+    for tag, note in notes:
+        if not note:
+            continue
+        rendered.append(f"- {tag}: {note}")
+    return "\n".join(rendered)
+
+
+# ----- PDF preflight + split (per ARCHITECTURE.md §6.6) -----------------------
+
+
+@dataclass(slots=True, kw_only=True)
+class _PdfChunk:
+    """One slice of a (possibly split) PDF, ready for an API call."""
+
+    pdf_bytes: bytes
+    start_page: int  # 1-indexed inclusive
+    end_page: int  # 1-indexed inclusive
+    basename: str
+    source_basename: str  # original PDF basename (used as source_doc)
+    on_disk_path: Path | None = None  # set when written under debug/split/
+
+
+def _read_pdf_chunks(
+    pdf_path: Path,
+    *,
+    debug_dir: Path | None,
+    run_id: str,
+) -> list[_PdfChunk]:
+    """Open ``pdf_path`` and return one or more chunks ready for API calls.
+
+    A single-call PDF (<=80 pages AND <=32 MB) yields a one-element list
+    with the raw bytes. Otherwise the PDF is split at 80-page boundaries
+    with a 1-page overlap.
+    """
+    if not pdf_path.exists():
+        raise FileNotFoundError(f"PDF not found: {pdf_path}")
+
+    raw = pdf_path.read_bytes()
+    size_bytes = len(raw)
+    reader = pypdf.PdfReader(io.BytesIO(raw))
+    page_count = len(reader.pages)
+
+    # Anthropic enforces both a page-count cap (80) and a byte-size cap
+    # (32 MB) on a single request. If we're under both limits we send the
+    # raw PDF unchanged; otherwise we split into 80-page slices with a
+    # 1-page overlap so a field that straddles a page break is seen by both
+    # halves.
+    needs_split = page_count > MAX_PAGES_PER_CALL or size_bytes > MAX_BYTES_PER_CALL
+    if not needs_split:
+        return [
+            _PdfChunk(
+                pdf_bytes=raw,
+                start_page=1,
+                end_page=page_count,
+                basename=pdf_path.name,
+                source_basename=pdf_path.name,
+            )
+        ]
+
+    chunk_specs = _compute_split_ranges(page_count)
+    logger.info(
+        "claude.split_pdf doc=%s page_count=%d size_bytes=%d chunks=%s",
+        pdf_path.name,
+        page_count,
+        size_bytes,
+        chunk_specs,
+    )
+
+    chunks: list[_PdfChunk] = []
+    out_dir: Path | None = None
+    if debug_dir is not None:
+        # Per ARCHITECTURE.md §6.6: write split chunks under
+        # <client>/debug/split/<run_id>/. The caller passes the per-doc
+        # claude debug dir; we hop up to ../split/<run_id>/.
+        out_dir = debug_dir.parent.parent / "split" / run_id
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+    for idx, (start, end) in enumerate(chunk_specs, start=1):
+        writer = pypdf.PdfWriter()
+        # pypdf pages are 0-indexed; ranges are 1-indexed inclusive.
+        for page_idx in range(start - 1, end):
+            writer.add_page(reader.pages[page_idx])
+        buf = io.BytesIO()
+        writer.write(buf)
+        buf.seek(0)
+        chunk_bytes = buf.read()
+        chunk_basename = f"{pdf_path.stem}.chunk{idx:02d}.p{start}-{end}.pdf"
+        on_disk: Path | None = None
+        if out_dir is not None:
+            on_disk = out_dir / chunk_basename
+            on_disk.write_bytes(chunk_bytes)
+        chunks.append(
+            _PdfChunk(
+                pdf_bytes=chunk_bytes,
+                start_page=start,
+                end_page=end,
+                basename=chunk_basename,
+                source_basename=pdf_path.name,
+                on_disk_path=on_disk,
+            )
+        )
+
+    return chunks
+
+
+def _compute_split_ranges(page_count: int) -> list[tuple[int, int]]:
+    """Return list of (start_page, end_page) 1-indexed inclusive ranges.
+
+    Each chunk is at most ``MAX_PAGES_PER_CALL`` pages. Adjacent chunks
+    overlap by ``PAGE_OVERLAP`` pages: chunk N's last page == chunk N+1's
+    first page.
+    """
+    if page_count <= MAX_PAGES_PER_CALL:
+        return [(1, page_count)]
+
+    ranges: list[tuple[int, int]] = []
+    start = 1
+    while start <= page_count:
+        end = min(start + MAX_PAGES_PER_CALL - 1, page_count)
+        ranges.append((start, end))
+        if end == page_count:
+            break
+        # Next chunk starts at the overlap boundary.
+        start = end - PAGE_OVERLAP + 1
+    return ranges
+
+
+# ----- Message construction --------------------------------------------------
+
+
+def _build_request(
+    *,
+    pdf_chunk: _PdfChunk,
+    field_map: FieldMap,
+    glossary: str,
+    system_prompt: str,
+    model: str,
+    user_instruction: str,
+    tool_schema: dict[str, Any],
+) -> dict[str, Any]:
+    """Build the kwargs dict passed to ``client.messages.create``.
+
+    Two cache_control breakpoints per ARCHITECTURE.md §6.3:
+      BP1 = system block (system_prompt + glossary + examples)
+      BP2 = first user text block (Field Map + notes_for_claude)
+    """
+    system_text = _build_system_text(system_prompt=system_prompt, glossary=glossary)
+    field_map_text = _serialize_field_map_for_prompt(field_map)
+
+    pdf_b64 = base64.standard_b64encode(pdf_chunk.pdf_bytes).decode("ascii")
+
+    # User instruction tagged with chunk page range when this is a split chunk.
+    # A chunk is a "split chunk" when its basename differs from the source
+    # basename (set by _read_pdf_chunks for any chunk it actually produced
+    # via PdfWriter, never for the single-call passthrough).
+    full_instruction = user_instruction
+    if pdf_chunk.basename != pdf_chunk.source_basename:
+        full_instruction = (
+            f"{user_instruction}\n\nNote: this is pages {pdf_chunk.start_page}-{pdf_chunk.end_page} "
+            f"of '{pdf_chunk.source_basename}'. Use the original document basename "
+            f"('{pdf_chunk.source_basename}') as source_doc and report source_page "
+            f"as the page number within this chunk's range."
+        )
+
+    # Two prompt-cache breakpoints. Anthropic only caches identical prefixes,
+    # so we pin the stable system prompt + glossary as breakpoint 1 and the
+    # Field Map block as breakpoint 2. After the first call in a session
+    # both blocks come back as cache_read tokens (cheap), and only the PDF
+    # bytes + user instruction are billed at full rate.
+    request: dict[str, Any] = {
+        "model": model,
+        "max_tokens": MAX_TOKENS_PER_CALL,
+        "system": [
+            {
+                "type": "text",
+                "text": system_text,
+                "cache_control": {"type": "ephemeral"},  # Breakpoint 1
+            }
+        ],
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": field_map_text,
+                        "cache_control": {"type": "ephemeral"},  # Breakpoint 2
+                    },
+                    {
+                        "type": "document",
+                        "source": {
+                            "type": "base64",
+                            "media_type": "application/pdf",
+                            "data": pdf_b64,
+                        },
+                    },
+                    {
+                        "type": "text",
+                        "text": full_instruction,
+                    },
+                ],
+            }
+        ],
+        "tools": [tool_schema],
+        "tool_choice": {"type": "any"},
+    }
+
+    _warn_if_breakpoint_below_min(system_text, label="system_prompt+glossary")
+    _warn_if_breakpoint_below_min(field_map_text, label="field_map")
+
+    return request
+
+
+def _build_system_text(*, system_prompt: str, glossary: str) -> str:
+    """Concatenate the stable system text block.
+
+    Order is fixed for cache-key stability: system_prompt, then glossary.
+    Few-shot examples may already be embedded in ``system_prompt`` by the
+    Extractor; we don't enforce a specific layout here.
+    """
+    parts = [system_prompt.rstrip(), "", "=== GLOSSARY ===", glossary.rstrip()]
+    return "\n".join(parts)
+
+
+def _warn_if_breakpoint_below_min(text: str, *, label: str) -> None:
+    """Heuristic cache-min check.
+
+    Sonnet 4.6 needs cached prefixes >= 2,048 tokens. We can't tokenize
+    locally, so we use a chars/token heuristic to flag obviously-tiny
+    breakpoints. The actual token count is verified post-hoc via
+    response.usage and logged as a cache_miss warning if both creation
+    and read are zero.
+    """
+    approx_tokens = max(1, len(text) // _CHARS_PER_TOKEN_HEURISTIC)
+    if approx_tokens < SONNET_CACHE_MIN_TOKENS:
+        logger.warning(
+            "claude.cache_breakpoint_undersized label=%s approx_tokens=%d threshold=%d",
+            label,
+            approx_tokens,
+            SONNET_CACHE_MIN_TOKENS,
+        )
+
+
+# ----- API call with retry + cache verification + debug ----------------------
+
+
+def _resolve_client(api_key: str | None) -> anthropic.Anthropic:
+    """Build an Anthropic client. Caller-supplied key overrides secret store."""
+    key = api_key or secret_store.get_anthropic_api_key()
+    if not key:
+        raise ClaudeAuthError(
+            "No Anthropic API key found. Set ANTHROPIC_API_KEY env var or "
+            "store via secret_store.set_anthropic_api_key()."
+        )
+    # SDK reads ANTHROPIC_API_KEY from env if api_key is None; we pass
+    # explicitly so we honor the secret_store value.
+    return anthropic.Anthropic(api_key=key)
+
+
+def _classify_anthropic_error(exc: BaseException) -> ClaudeError:
+    """Map an Anthropic SDK exception to our typed hierarchy."""
+    if isinstance(exc, anthropic.AuthenticationError | anthropic.PermissionDeniedError):
+        return ClaudeAuthError(str(exc))
+    if isinstance(exc, anthropic.RateLimitError):
+        return ClaudeRateLimitError(str(exc))
+    # 5xx
+    if isinstance(exc, anthropic.InternalServerError):
+        return ClaudeServerError(str(exc))
+    if isinstance(exc, anthropic.APIStatusError):
+        status = getattr(exc, "status_code", None)
+        if isinstance(status, int) and status >= 500:
+            return ClaudeServerError(str(exc))
+        if isinstance(status, int) and status in (401, 403):
+            return ClaudeAuthError(str(exc))
+        return ClaudeError(str(exc))
+    if isinstance(exc, anthropic.APIConnectionError | anthropic.APITimeoutError):
+        return ClaudeServerError(str(exc))
+    return ClaudeError(str(exc))
+
+
+def _create_message_with_retry(
+    client: anthropic.Anthropic,
+    *,
+    request: dict[str, Any],
+    backoffs: Sequence[int] = RETRY_BACKOFF_SECONDS,
+) -> Any:
+    """Call ``client.messages.create`` with exponential backoff on transient errors.
+
+    Retries on ``ClaudeRateLimitError`` (429) and ``ClaudeServerError`` (5xx /
+    connection / timeout). Surfaces ``ClaudeAuthError`` and other 4xx
+    immediately. ``time.sleep`` is read from the module on each call so
+    tests can monkeypatch it.
+    """
+    last_classified: ClaudeError | None = None
+    # Total attempts = 1 + len(backoffs). With (1,2,4,8) → 4 retries, 5 attempts.
+    for attempt in range(len(backoffs) + 1):
+        try:
+            return client.messages.create(**request)
+        except anthropic.AnthropicError as raw:
+            classified = _classify_anthropic_error(raw)
+            last_classified = classified
+            # Only retry the transient classes: rate limits and 5xx/network.
+            # Auth errors mean the API key is bad — retrying just delays the
+            # operator-visible failure.
+            if not isinstance(classified, ClaudeRateLimitError | ClaudeServerError):
+                # Auth or other 4xx — surface immediately.
+                raise classified from raw
+            if attempt >= len(backoffs):
+                raise classified from raw
+            delay = backoffs[attempt]
+            logger.warning(
+                "claude.retry attempt=%d/%d delay=%ds error=%s",
+                attempt + 1,
+                len(backoffs) + 1,
+                delay,
+                classified.__class__.__name__,
+            )
+            time.sleep(delay)
+    # Defensive: loop should always either return or raise.
+    raise last_classified or ClaudeError("messages.create exhausted retries")
+
+
+# ----- Response parsing ------------------------------------------------------
+
+
+def _extract_tool_use_records(
+    response: Any,
+    *,
+    pdf_chunk: _PdfChunk,
+    model: str,
+) -> list[ExtractedField]:
+    """Parse ``response.content`` into ``ExtractedField`` records.
+
+    Only ``tool_use`` blocks named ``record_extracted_field`` are honored.
+    ``source_doc`` from Claude is ignored in favor of the original PDF
+    basename to keep records canonical across split chunks.
+    """
+    records: list[ExtractedField] = []
+    content = getattr(response, "content", []) or []
+    for block in content:
+        block_type = getattr(block, "type", None)
+        if block_type != "tool_use":
+            continue
+        name = getattr(block, "name", None)
+        if name != "record_extracted_field":
+            logger.warning("claude.unexpected_tool name=%s", name)
+            continue
+        raw_input = getattr(block, "input", None) or {}
+        try:
+            record = _record_from_tool_input(
+                raw_input, source_basename=pdf_chunk.source_basename, model=model
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            logger.warning("claude.tool_input_invalid error=%s input=%r", exc, raw_input)
+            continue
+        records.append(record)
+    return records
+
+
+def _record_from_tool_input(
+    raw: Mapping[str, Any],
+    *,
+    source_basename: str,
+    model: str,
+) -> ExtractedField:
+    """Convert a single ``tool_use.input`` dict to an ``ExtractedField``."""
+    domain_tag = str(raw["domain_tag"])
+    value = raw.get("value")
+    source_page = int(raw["source_page"])
+    source_quote = str(raw.get("source_quote", ""))
+    confidence = float(raw["confidence"])
+    needs_review = bool(raw.get("needs_review", False))
+    repeatable_group = raw.get("repeatable_group")
+    repeatable_index = raw.get("repeatable_index")
+    if repeatable_group is not None:
+        repeatable_group = str(repeatable_group)
+    if repeatable_index is not None:
+        repeatable_index = int(repeatable_index)
+    return ExtractedField(
+        domain_tag=domain_tag,
+        value=value,
+        source_doc=source_basename,
+        source_page=source_page,
+        source_quote=source_quote,
+        confidence=confidence,
+        needs_review=needs_review,
+        repeatable_group=repeatable_group,
+        repeatable_index=repeatable_index,
+        model_used=model,
+    )
+
+
+# ----- Cache verification + debug artifact saving ----------------------------
+
+
+def _log_cache_usage(
+    response: Any,
+    *,
+    run_id: str,
+    model: str,
+    doc_basename: str,
+    expected_cached: bool,
+    cache_miss_reason_hint: str | None = None,
+) -> None:
+    """Log cache + token usage; warn on apparent cache miss.
+
+    Per ARCHITECTURE.md §6.5 / RESEARCH.md Finding 5 / Amendment #4 + #17.
+    """
+    usage = getattr(response, "usage", None)
+    cache_creation = int(getattr(usage, "cache_creation_input_tokens", 0) or 0)
+    cache_read = int(getattr(usage, "cache_read_input_tokens", 0) or 0)
+    input_tokens = int(getattr(usage, "input_tokens", 0) or 0)
+    output_tokens = int(getattr(usage, "output_tokens", 0) or 0)
+    logger.info(
+        "claude.call run_id=%s model=%s doc=%s input=%d output=%d "
+        "cache_creation=%d cache_read=%d",
+        run_id,
+        model,
+        doc_basename,
+        input_tokens,
+        output_tokens,
+        cache_creation,
+        cache_read,
+    )
+    if expected_cached and cache_creation == 0 and cache_read == 0:
+        reason = cache_miss_reason_hint or "unknown"
+        logger.warning(
+            "claude.cache_miss run_id=%s model=%s doc=%s reason=%s",
+            run_id,
+            model,
+            doc_basename,
+            reason,
+        )
+
+
+def _save_debug_artifacts(
+    *,
+    debug_dir: Path,
+    doc_id: str,
+    call_n: int,
+    request: Mapping[str, Any],
+    response: Any,
+) -> None:
+    """Write request and response JSON to the per-run debug directory.
+
+    PDF base64 payloads are elided to a sha256 hash so the artifacts stay
+    small. The original PDF stays at the source path.
+    """
+    debug_dir.mkdir(parents=True, exist_ok=True)
+    safe_doc_id = doc_id.replace("/", "_").replace("\\", "_")
+    req_path = debug_dir / f"{safe_doc_id}-call_{call_n}.req.json"
+    resp_path = debug_dir / f"{safe_doc_id}-call_{call_n}.resp.json"
+
+    req_serializable = _elide_pdf_base64(request)
+    try:
+        req_path.write_text(
+            json.dumps(req_serializable, indent=2, default=str), encoding="utf-8"
+        )
+    except OSError as exc:  # pragma: no cover - debug best-effort
+        logger.warning("claude.debug_write_failed path=%s error=%s", req_path, exc)
+        return
+
+    resp_payload = _response_to_dict(response)
+    try:
+        resp_path.write_text(
+            json.dumps(resp_payload, indent=2, default=str), encoding="utf-8"
+        )
+    except OSError as exc:  # pragma: no cover - debug best-effort
+        logger.warning("claude.debug_write_failed path=%s error=%s", resp_path, exc)
+
+
+def _elide_pdf_base64(request: Mapping[str, Any]) -> dict[str, Any]:
+    """Replace PDF base64 with a hash placeholder for debug dumps."""
+    cloned: dict[str, Any] = json.loads(json.dumps(request, default=str))
+    for message in cloned.get("messages", []):
+        for block in message.get("content", []) or []:
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") == "document":
+                source = block.get("source") or {}
+                data = source.get("data")
+                if isinstance(data, str) and len(data) > 64:
+                    digest = hashlib.sha256(data.encode("ascii")).hexdigest()
+                    source["data"] = f"<base64 elided sha256={digest} bytes_b64={len(data)}>"
+                    block["source"] = source
+    return cloned
+
+
+def _response_to_dict(response: Any) -> dict[str, Any]:
+    """Best-effort coercion of a Message response to a serializable dict."""
+    for attr in ("model_dump", "to_dict"):
+        fn = getattr(response, attr, None)
+        if callable(fn):
+            try:
+                return fn()
+            except TypeError:
+                try:
+                    return fn(mode="python")
+                except Exception:  # pragma: no cover
+                    pass
+    # Fallback: pull commonly-needed attributes by hand.
+    return {
+        "id": getattr(response, "id", None),
+        "model": getattr(response, "model", None),
+        "stop_reason": getattr(response, "stop_reason", None),
+        "content": [
+            {
+                "type": getattr(b, "type", None),
+                "name": getattr(b, "name", None),
+                "input": getattr(b, "input", None),
+                "text": getattr(b, "text", None),
+            }
+            for b in getattr(response, "content", []) or []
+        ],
+        "usage": {
+            "input_tokens": getattr(getattr(response, "usage", None), "input_tokens", None),
+            "output_tokens": getattr(getattr(response, "usage", None), "output_tokens", None),
+            "cache_creation_input_tokens": getattr(
+                getattr(response, "usage", None), "cache_creation_input_tokens", None
+            ),
+            "cache_read_input_tokens": getattr(
+                getattr(response, "usage", None), "cache_read_input_tokens", None
+            ),
+        },
+    }
+
+
+# ----- Per-chunk extraction --------------------------------------------------
+
+
+@dataclass(slots=True, kw_only=True)
+class _CallContext:
+    """Runtime context shared across calls inside a single extract_from_pdf."""
+
+    run_id: str
+    debug_dir: Path | None
+    client: anthropic.Anthropic
+    field_map: FieldMap
+    glossary: str
+    system_prompt: str
+    tool_schema: dict[str, Any]
+    call_counter: dict[str, int] = field(default_factory=dict)
+    expected_cached: bool = False  # flips to True after the first successful call
+
+    def next_call_number(self, doc_id: str) -> int:
+        n = self.call_counter.get(doc_id, 0) + 1
+        self.call_counter[doc_id] = n
+        return n
+
+
+def _extract_one_chunk(
+    chunk: _PdfChunk,
+    *,
+    ctx: _CallContext,
+    model: str,
+    user_instruction: str,
+    cache_miss_reason_hint: str | None = None,
+) -> list[ExtractedField]:
+    """Run extraction on a single chunk; handle retries, cache logging, debug."""
+    request = _build_request(
+        pdf_chunk=chunk,
+        field_map=ctx.field_map,
+        glossary=ctx.glossary,
+        system_prompt=ctx.system_prompt,
+        model=model,
+        user_instruction=user_instruction,
+        tool_schema=ctx.tool_schema,
+    )
+
+    try:
+        response = _create_message_with_retry(ctx.client, request=request)
+    except ClaudeError:
+        # Try to dump the request even on failure for debug forensics.
+        if ctx.debug_dir is not None:
+            try:
+                call_n = ctx.next_call_number(chunk.basename)
+                ctx.debug_dir.mkdir(parents=True, exist_ok=True)
+                req_path = ctx.debug_dir / f"{chunk.basename}-call_{call_n}.req.json"
+                req_path.write_text(
+                    json.dumps(_elide_pdf_base64(request), indent=2, default=str),
+                    encoding="utf-8",
+                )
+            except OSError:  # pragma: no cover - best effort
+                pass
+        raise
+
+    _log_cache_usage(
+        response,
+        run_id=ctx.run_id,
+        model=model,
+        doc_basename=chunk.basename,
+        expected_cached=ctx.expected_cached,
+        cache_miss_reason_hint=cache_miss_reason_hint,
+    )
+
+    if ctx.debug_dir is not None:
+        call_n = ctx.next_call_number(chunk.basename)
+        _save_debug_artifacts(
+            debug_dir=ctx.debug_dir,
+            doc_id=chunk.basename,
+            call_n=call_n,
+            request=request,
+            response=response,
+        )
+
+    # After the first successful call the system+field_map prefix is in
+    # the cache; subsequent calls are expected to hit it.
+    ctx.expected_cached = True
+
+    return _extract_tool_use_records(response, pdf_chunk=chunk, model=model)
+
+
+# ----- Merge across chunks ---------------------------------------------------
+
+
+def _record_dedup_key(rec: ExtractedField) -> tuple[str, str | None, int | None]:
+    return (rec.domain_tag, rec.repeatable_group, rec.repeatable_index)
+
+
+def _merge_chunk_records(chunks: Iterable[Sequence[ExtractedField]]) -> list[ExtractedField]:
+    """Union records across chunks; dedup by (domain_tag, group, index).
+
+    On dedup conflicts, prefer the higher-confidence record (per
+    ARCHITECTURE.md §6.6). The lower-confidence record is dropped here;
+    extract.py is responsible for funneling true cross-document conflicts
+    into ``state.fields[...].conflicts[]`` via ``merge_extraction``.
+    """
+    by_key: dict[tuple[str, str | None, int | None], ExtractedField] = {}
+    for batch in chunks:
+        for rec in batch:
+            key = _record_dedup_key(rec)
+            existing = by_key.get(key)
+            if existing is None or rec.confidence > existing.confidence:
+                by_key[key] = rec
+    # Stable order: by domain_tag then index.
+    return sorted(
+        by_key.values(),
+        key=lambda r: (r.domain_tag, r.repeatable_group or "", r.repeatable_index or 0),
+    )
+
+
+# ----- Public entry points ---------------------------------------------------
+
+
+def extract_from_pdf(
+    pdf_path: Path,
+    field_map: FieldMap,
+    glossary: str,
+    system_prompt: str,
+    *,
+    force_opus: bool = False,
+    run_id: str,
+    debug_dir: Path | None = None,
+    api_key: str | None = None,
+) -> list[ExtractedField]:
+    """Extract every field Claude can find from ``pdf_path``.
+
+    Workflow:
+
+    1. Preflight + (if needed) split at 80-page boundaries with 1-page overlap.
+    2. Build the ``record_extracted_field`` tool schema from the live Field Map.
+    3. First pass against Sonnet 4.6 (or Opus if ``force_opus``) per chunk.
+    4. Auto-escalation: any field with ``confidence < 0.7`` OR
+       ``needs_review`` OR required-and-empty is re-prompted against
+       Opus 4.7. The Opus result replaces the Sonnet record and is tagged
+       ``model_used="claude-opus-4-7"`` for GUI badging.
+    5. Cache + token usage is logged INFO on every call; cache miss is
+       logged WARNING (never raised).
+
+    ``debug_dir`` is the per-doc claude debug directory the caller wants
+    artifacts under (typically ``<client>/debug/claude/<run_id>/``). When
+    omitted, no artifacts are written.
+    """
+    if not pdf_path.is_absolute():
+        pdf_path = pdf_path.resolve()
+
+    client = _resolve_client(api_key)
+    chunks = _read_pdf_chunks(pdf_path, debug_dir=debug_dir, run_id=run_id)
+    tool_schema = build_record_field_tool_schema(field_map)
+
+    ctx = _CallContext(
+        run_id=run_id,
+        debug_dir=debug_dir,
+        client=client,
+        field_map=field_map,
+        glossary=glossary,
+        system_prompt=system_prompt,
+        tool_schema=tool_schema,
+    )
+
+    initial_model = DEFAULT_OPUS_MODEL if force_opus else DEFAULT_SONNET_MODEL
+    user_instruction = (
+        "Extract every relevant insurance field from the attached PDF. "
+        "For each one, call the record_extracted_field tool exactly once. "
+        "Use the canonical domain_tag from the FIELD MAP block above. "
+        "If a field appears in a repeatable group (vehicle/driver/location/"
+        "loss_payee/additional_insured/prior_carrier/loss), set repeatable_group "
+        "to the group name and repeatable_index starting at 0. "
+        "Always include a verbatim source_quote and the source_page (1-indexed). "
+        "If you are unsure about a value, set confidence accordingly and set "
+        "needs_review=true."
+    )
+
+    chunk_records: list[list[ExtractedField]] = []
+    for idx, chunk in enumerate(chunks):
+        # First call of the run can't possibly hit the cache; subsequent calls can.
+        chunk_recs = _extract_one_chunk(
+            chunk,
+            ctx=ctx,
+            model=initial_model,
+            user_instruction=user_instruction,
+            cache_miss_reason_hint=(
+                "first_call_in_session" if idx == 0 else None
+            ),
+        )
+        chunk_records.append(chunk_recs)
+
+    first_pass = _merge_chunk_records(chunk_records)
+
+    if force_opus:
+        # Already Opus; tag and return.
+        return [_with_model(rec, DEFAULT_OPUS_MODEL) for rec in first_pass]
+
+    # Two-pass escalation: Sonnet is fast and cheap, but Opus catches the
+    # fields Sonnet flagged as low-confidence / missing-required. We only
+    # rerun Opus on those specific fields — full re-extraction would burn
+    # tokens with no payoff for fields Sonnet was already sure about.
+    needs_escalation = _select_for_escalation(first_pass, field_map=field_map)
+    if not needs_escalation:
+        return first_pass
+
+    logger.info(
+        "claude.escalation run_id=%s doc=%s candidates=%d",
+        run_id,
+        pdf_path.name,
+        len(needs_escalation),
+    )
+
+    # Second pass: Opus on un-resolved fields. We pass the original PDF
+    # path (un-split — Opus accepts the same 32 MB / 80 pp limits, so we
+    # split again if needed inside reextract_low_confidence_fields).
+    opus_records = _reextract_against_opus(
+        target_fields=needs_escalation,
+        pdf_path=pdf_path,
+        ctx=ctx,
+    )
+
+    return _merge_first_pass_with_opus(first_pass, opus_records)
+
+
+def reextract_low_confidence_fields(
+    fields: list[ExtractedField],
+    pdf_path: Path,
+    field_map: FieldMap,
+    system_prompt: str,
+    *,
+    run_id: str,
+    debug_dir: Path | None = None,
+    glossary: str = "",
+    api_key: str | None = None,
+) -> list[ExtractedField]:
+    """Per-field re-prompt against Opus 4.7.
+
+    Used by extract.py for fields the operator/extractor wants Claude to
+    reconsider after the initial pass. Returns replacement records tagged
+    ``model_used="claude-opus-4-7"``.
+    """
+    if not fields:
+        return []
+
+    if not pdf_path.is_absolute():
+        pdf_path = pdf_path.resolve()
+
+    client = _resolve_client(api_key)
+    chunks = _read_pdf_chunks(pdf_path, debug_dir=debug_dir, run_id=run_id)
+    tool_schema = build_record_field_tool_schema(field_map)
+
+    ctx = _CallContext(
+        run_id=run_id,
+        debug_dir=debug_dir,
+        client=client,
+        field_map=field_map,
+        glossary=glossary,
+        system_prompt=system_prompt,
+        tool_schema=tool_schema,
+    )
+
+    return _reextract_against_opus(
+        target_fields=fields,
+        pdf_path=pdf_path,
+        ctx=ctx,
+        prebuilt_chunks=chunks,
+    )
+
+
+def _reextract_against_opus(
+    *,
+    target_fields: Sequence[ExtractedField],
+    pdf_path: Path,
+    ctx: _CallContext,
+    prebuilt_chunks: Sequence[_PdfChunk] | None = None,
+) -> list[ExtractedField]:
+    """Run Opus 4.7 on the document, asking only about the supplied fields."""
+    chunks = (
+        list(prebuilt_chunks)
+        if prebuilt_chunks is not None
+        else _read_pdf_chunks(pdf_path, debug_dir=ctx.debug_dir, run_id=ctx.run_id)
+    )
+
+    target_tags = sorted({f.domain_tag for f in target_fields})
+    instruction = _opus_reextract_instruction(target_fields)
+
+    chunk_records: list[list[ExtractedField]] = []
+    for chunk in chunks:
+        recs = _extract_one_chunk(
+            chunk,
+            ctx=ctx,
+            model=DEFAULT_OPUS_MODEL,
+            user_instruction=instruction,
+            cache_miss_reason_hint=None,
+        )
+        # Only keep records that match a requested tag.
+        chunk_records.append([r for r in recs if r.domain_tag in set(target_tags)])
+
+    merged = _merge_chunk_records(chunk_records)
+    return [_with_model(r, DEFAULT_OPUS_MODEL) for r in merged]
+
+
+def _opus_reextract_instruction(target_fields: Sequence[ExtractedField]) -> str:
+    """Build the Opus re-prompt body for a specific set of low-confidence fields."""
+    bullets: list[str] = []
+    for f in target_fields:
+        prior_value = "(missing)" if f.value in (None, "") else repr(f.value)
+        prior_quote = f.source_quote.strip() or "(no quote)"
+        bullet = (
+            f"- {f.domain_tag} (prior value={prior_value}, prior confidence={f.confidence:.2f}, "
+            f"prior page={f.source_page}, prior quote={prior_quote!r})"
+        )
+        bullets.append(bullet)
+    body = "\n".join(bullets)
+    return (
+        "These specific fields had low confidence on the first pass — please look "
+        "at the attached PDF again and be precise. For each one, call "
+        "record_extracted_field with your best value and a confidence between 0 "
+        "and 1. If you genuinely cannot find a value, return null with "
+        "needs_review=true and explain in the source_quote.\n\n"
+        f"Fields to re-examine:\n{body}"
+    )
+
+
+# ----- Escalation gate -------------------------------------------------------
+
+
+def _select_for_escalation(
+    records: Sequence[ExtractedField],
+    *,
+    field_map: FieldMap,
+) -> list[ExtractedField]:
+    """Apply the ARCHITECTURE.md §6.4 escalation rules."""
+    selected: list[ExtractedField] = []
+    seen_keys: set[tuple[str, str | None, int | None]] = set()
+    for rec in records:
+        if _should_escalate(rec, field_map=field_map):
+            key = _record_dedup_key(rec)
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            selected.append(rec)
+    return selected
+
+
+def _should_escalate(rec: ExtractedField, *, field_map: FieldMap) -> bool:
+    if rec.confidence < CONFIDENCE_LOW_THRESHOLD:
+        return True
+    if rec.needs_review:
+        return True
+    if _is_required_missing(rec, field_map=field_map):
+        return True
+    return False
+
+
+def _is_required_missing(rec: ExtractedField, *, field_map: FieldMap) -> bool:
+    if rec.value not in (None, ""):
+        return False
+    entry = _safe_lookup_by_domain_tag(field_map, rec.domain_tag)
+    if entry is None:
+        return False
+    return bool(getattr(entry, "is_required", False))
+
+
+def _safe_lookup_by_domain_tag(field_map: FieldMap, domain_tag: str) -> Any | None:
+    try:
+        return field_map.lookup_by_domain_tag(domain_tag)
+    except Exception:  # pragma: no cover - defensive
+        return None
+
+
+def _merge_first_pass_with_opus(
+    sonnet: Sequence[ExtractedField],
+    opus: Sequence[ExtractedField],
+) -> list[ExtractedField]:
+    """Replace Sonnet records with Opus records on matching dedup keys.
+
+    Sonnet records that weren't escalated keep their ``model_used`` value.
+    Opus records are tagged ``model_used="claude-opus-4-7"`` (already done
+    upstream). Records present only in Opus output (e.g., a field Sonnet
+    missed entirely but Opus found) are appended.
+    """
+    by_key: dict[tuple[str, str | None, int | None], ExtractedField] = {
+        _record_dedup_key(r): r for r in sonnet
+    }
+    for r in opus:
+        by_key[_record_dedup_key(r)] = r
+    return sorted(
+        by_key.values(),
+        key=lambda r: (r.domain_tag, r.repeatable_group or "", r.repeatable_index or 0),
+    )
+
+
+def _with_model(rec: ExtractedField, model: str) -> ExtractedField:
+    """Return a copy of ``rec`` with ``model_used`` set to ``model``."""
+    return dataclasses.replace(rec, model_used=model)
