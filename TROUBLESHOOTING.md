@@ -239,7 +239,7 @@ Most things in this tool are designed to be operator-recoverable. **Email Andrew
 - **Many fields fail selector resolution in a row** during an entry session. EPIC has likely had a UI update; the Field Map needs to be refreshed before the tool will be useful again.
 - **Daily snapshots are also corrupt** (you walked the recovery chain and even the snapshots wouldn't load).
 - **`bootstrap.ps1` won't complete** even after you fixed obvious problems (Python on PATH, network up).
-- **The tool is asking you to confirm a brand-new domain_tag** and you don't know what it should be tagged as. (See ARCHITECTURE.md §3 for the tag grammar — but if it's unclear, escalate.)
+- **The tool is asking you to confirm a brand-new domain_tag** and you don't know what it should be tagged as. (See [`docs/workflow/ARCHITECTURE.md`](docs/workflow/ARCHITECTURE.md) §3 for the tag grammar — but if it's unclear, escalate.)
 - **Anything you can't explain to yourself.** This tool is meant to keep you in control of the data flowing into EPIC. If something is happening that you don't understand, stop and ask before clicking through.
 
 When emailing for help, include:

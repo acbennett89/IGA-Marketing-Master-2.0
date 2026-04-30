@@ -37,13 +37,17 @@ If the script reports any errors, see TROUBLESHOOTING.md "How to install / first
 
 ### Launching
 
-After installation, launch the tool from a PowerShell prompt:
+The simplest way: **double-click `Launcher.vbs`** at the project root. It runs the GUI silently with no console window and uses the project's `.venv`.
+
+For verbose logging + Playwright tracing + retained debug artifacts, double-click **`Launcher (Debug).vbs`** instead.
+
+If you prefer the command line, from a PowerShell prompt:
 
 ```
 iga-marketing-master-2
 ```
 
-(or `python -m iga_marketing_master_2.cli`, if the entry point isn't on your PATH).
+(or `python -m iga_marketing_master_2.cli`, if the entry point isn't on your PATH). Add `--debug` for the equivalent of the debug launcher.
 
 The first launch will:
 
@@ -125,10 +129,13 @@ Without `--debug`, the only on-disk record of a session is the `runs.log` file i
 
 ## Where to read next
 
-- **PLAN-REVIEW.md** — the authoritative project plan (Path B, single-user, all 17 amendments folded in).
-- **ARCHITECTURE.md** — the technical reference: every module's contract, data shape, and decision rationale.
-- **TROUBLESHOOTING.md** — the operator-facing recovery guide. Read this first when something goes wrong.
-- **DECISION-MAP-\<agent\>.md** — per-developer-agent decision logs from the build, useful for understanding why a piece of code is the way it is.
+All workflow and design artifacts live under [`docs/workflow/`](docs/workflow/) — kept together for easy navigation. The most useful starting points:
+
+- **[docs/workflow/PLAN-REVIEW.md](docs/workflow/PLAN-REVIEW.md)** — the authoritative project plan (Path B, single-user, all 17 amendments folded in).
+- **[docs/workflow/ARCHITECTURE.md](docs/workflow/ARCHITECTURE.md)** — the technical reference: every module's contract, data shape, and decision rationale.
+- **[TROUBLESHOOTING.md](TROUBLESHOOTING.md)** — the operator-facing recovery guide. Read this first when something goes wrong.
+- **[docs/workflow/DECISION-MAP-\<agent\>.md](docs/workflow/)** — per-developer-agent decision logs from the build, useful for understanding why a piece of code is the way it is.
+- **[docs/workflow/CHECK-REPORT.md](docs/workflow/CHECK-REPORT.md)** — the post-build verification record (224 tests passing, all agents verified, tag `v1.0-verified`).
 
 ---
 
@@ -155,8 +162,8 @@ pytest tests/test_state.py -v
 This project was built end-to-end by an orchestrated set of agents, summarized briefly here for future maintainers:
 
 1. **Setup agent** — scaffolded the repo, branch, requirements, and bootstrap script.
-2. **Architecture agent** — wrote ARCHITECTURE.md (the contract every developer agent then implemented against). Resolved the `domain_tag` grammar question.
-3. **7 developer agents in parallel** — `field-map-agent`, `config-and-cli-agent`, `state-agent`, `claude-client-agent`, `extraction-agent`, `gui-agent`, `epic-driver-agent`. Each produced its module(s), tests, and a `DECISION-MAP-*.md` log.
+2. **Architecture agent** — wrote `docs/workflow/ARCHITECTURE.md` (the contract every developer agent then implemented against). Resolved the `domain_tag` grammar question.
+3. **7 developer agents in parallel** — `field-map-agent`, `config-and-cli-agent`, `state-agent`, `claude-client-agent`, `extraction-agent`, `gui-agent`, `epic-driver-agent`. Each produced its module(s), tests, and a `DECISION-MAP-*.md` log under `docs/workflow/`.
 4. **Documentation agent (Phase 2)** — added inline comments to every source file and wrote this README plus TROUBLESHOOTING.md.
 
-All design choices are anchored to PLAN-REVIEW.md and ARCHITECTURE.md. Path B (single-user, local Working Library) is the explicit scope for v1; multi-user / SharePoint sync is deferred to v1.5 and not addressed by this code.
+All design choices are anchored to [`docs/workflow/PLAN-REVIEW.md`](docs/workflow/PLAN-REVIEW.md) and [`docs/workflow/ARCHITECTURE.md`](docs/workflow/ARCHITECTURE.md). Path B (single-user, local Working Library) is the explicit scope for v1; multi-user / SharePoint sync is deferred to v1.5 and not addressed by this code.
