@@ -520,12 +520,96 @@ def test_run_controls_begin_entry_gating(qapp) -> None:
     assert not bar._begin_btn.isEnabled()
     bar.set_entering(False)
     assert bar._begin_btn.isEnabled()
+    # Extraction in flight also disables Begin Entry.
+    bar.set_extracting(True)
+    assert not bar._begin_btn.isEnabled()
+    bar.set_extracting(False)
+    assert bar._begin_btn.isEnabled()
     # Resume button visibility flips with paused state.
     assert not bar._resume_btn.isVisible()
     bar.set_paused(True)
     # Visibility is set; isVisible() requires the widget to be shown to its parent.
     # We just check the underlying state.
     assert bar._resume_btn.isVisibleTo(bar) or True  # tolerant — event loop hasn't run
+
+
+def test_run_controls_extract_gating(qapp) -> None:
+    """gui-fix-2 #1: Extract button needs queued PDFs and no in-flight run."""
+    from iga_marketing_master_2.gui.run_controls import RunControlsBar
+
+    bar = RunControlsBar()
+    # Empty queue -> disabled.
+    bar.set_pending_pdf_count(0)
+    assert not bar._extract_btn.isEnabled()
+    # Queued PDFs -> enabled.
+    bar.set_pending_pdf_count(2)
+    assert bar._extract_btn.isEnabled()
+    # Extraction in flight -> disabled even with queue.
+    bar.set_extracting(True)
+    assert not bar._extract_btn.isEnabled()
+    bar.set_extracting(False)
+    assert bar._extract_btn.isEnabled()
+    # Entry in flight -> disabled.
+    bar.set_entering(True)
+    assert not bar._extract_btn.isEnabled()
+    bar.set_entering(False)
+    assert bar._extract_btn.isEnabled()
+    # Paused -> disabled.
+    bar.set_paused(True)
+    assert not bar._extract_btn.isEnabled()
+    bar.set_paused(False)
+    assert bar._extract_btn.isEnabled()
+
+
+def test_pending_pdfs_pane_add_dedup_remove(qapp, tmp_path: Path) -> None:
+    """gui-fix-2 #1: queue widget dedups by resolved path and removes items."""
+    from iga_marketing_master_2.gui.pending_pdfs_pane import PendingPdfsPane
+
+    pane = PendingPdfsPane()
+    a = tmp_path / "a.pdf"
+    b = tmp_path / "b.pdf"
+    a.write_text("x")
+    b.write_text("x")
+
+    # Add three paths but two are the same — we expect 2 unique entries.
+    added = pane.add_paths([a, b, a])
+    assert added == 2
+    assert [p.name for p in pane.paths()] == ["a.pdf", "b.pdf"]
+
+    # Adding an already-queued path is a no-op.
+    again = pane.add_paths([a])
+    assert again == 0
+    assert pane.count() == 2
+
+    # set_paths replaces wholesale.
+    pane.set_paths([b])
+    assert [p.name for p in pane.paths()] == ["b.pdf"]
+
+    # clear_queue empties.
+    pane.clear_queue()
+    assert pane.count() == 0
+    assert pane.paths() == []
+
+
+def test_pending_pdfs_pane_emits_paths_changed(qapp, tmp_path: Path) -> None:
+    """The pane signals on every mutation so the host can refresh button states."""
+    from iga_marketing_master_2.gui.pending_pdfs_pane import PendingPdfsPane
+
+    pane = PendingPdfsPane()
+    a = tmp_path / "a.pdf"
+    a.write_text("x")
+
+    fires: list[None] = []
+    pane.paths_changed.connect(lambda: fires.append(None))
+
+    pane.add_paths([a])
+    assert len(fires) == 1
+    pane.add_paths([a])  # dedup -> no signal
+    assert len(fires) == 1
+    pane.set_paths([])
+    assert len(fires) == 2
+    pane.clear_queue()  # already empty -> no signal
+    assert len(fires) == 2
 
 
 def test_audit_log_pane_appends_event(qapp) -> None:

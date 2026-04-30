@@ -32,6 +32,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QMainWindow,
     QMessageBox,
+    QProgressBar,
     QSplitter,
     QTabWidget,
     QToolBar,
@@ -52,6 +53,7 @@ from .operator_modal import (
     SelectorUnresolvedPauseDialog,
 )
 from .pdf_preview import PdfPreview
+from .pending_pdfs_pane import PendingPdfsPane
 from .repeatable_pane import RepeatablePane
 from .run_controls import RunControlsBar
 from .section_table import (
@@ -158,11 +160,19 @@ class _CallableWorker(QObject):
     """Run a callable on a worker thread; emit signals for progress and completion.
 
     The callable receives the worker as its first argument so it can call
-    :meth:`emit_progress` to stream status updates. The host connects to
-    ``progress`` / ``finished`` / ``failed`` to update the UI.
+    :meth:`emit_progress` (message-only) or :meth:`emit_progress_full`
+    (message plus completed/total counters) to stream status updates.
+
+    The ``progress`` signal carries ``(message, current, total)``. When a
+    counter is unavailable (e.g., extraction has no per-doc callback yet),
+    the worker passes ``current=0`` and ``total=0`` and the host treats
+    the progress bar as indeterminate.
+
+    The host connects to ``progress`` / ``finished`` / ``failed`` to
+    update the UI.
     """
 
-    progress = Signal(str)
+    progress = Signal(str, int, int)
     finished = Signal(object)
     failed = Signal(str, str)  # (operator-readable, technical_detail)
 
@@ -173,7 +183,12 @@ class _CallableWorker(QObject):
         self._kwargs = kwargs
 
     def emit_progress(self, message: str) -> None:
-        self.progress.emit(message)
+        """Emit ``message`` with no counter (indeterminate)."""
+        self.progress.emit(message, 0, 0)
+
+    def emit_progress_full(self, message: str, current: int, total: int) -> None:
+        """Emit ``message`` with completed/total counters (determinate)."""
+        self.progress.emit(message, int(current), int(total))
 
     def run(self) -> None:
         try:
@@ -446,14 +461,19 @@ class MainWindow(QMainWindow):
         self._client: _ClientContext | None = None
         self._worker_thread: QThread | None = None
         self._worker: _CallableWorker | None = None
+        # Tracks which kind of run is in flight so the progress strip and
+        # run-controls can clear themselves correctly on finish/fail.
+        self._active_run_kind: str | None = None  # "extract" | "entry" | None
 
         self.setWindowTitle("IGA Marketing Master 2.0")
         self.resize(1400, 900)
+        self.setAcceptDrops(True)
 
         self._build_ui()
         self._handle_first_run_and_api_key()
         self._maybe_seed_initial_client()
         self._refresh_run_controls()
+        self._refresh_pending_pdfs_state()
 
     # -- UI construction ---------------------------------------------------
 
@@ -491,11 +511,18 @@ class MainWindow(QMainWindow):
         center_split.setStretchFactor(0, 3)
         center_split.setStretchFactor(1, 2)
 
-        # Bottom: audit log + run controls.
+        # Bottom: pending-PDFs queue + audit log + run controls.
+        self._pending_pdfs_pane = PendingPdfsPane(self)
+        self._pending_pdfs_pane.paths_changed.connect(self._refresh_pending_pdfs_state)
+
+        pending_label = QLabel("Pending PDFs (drag here or use 'Add PDFs...')", self)
+        pending_label.setStyleSheet("QLabel { color: #555; padding: 2px 4px; }")
+
         self._audit_log = AuditLogPane(self)
         self._audit_log.attach_logger("iga", level=logging.INFO)
 
         self._run_controls = RunControlsBar(self)
+        self._run_controls.extract_clicked.connect(self._on_extract_clicked)
         self._run_controls.begin_entry_clicked.connect(self._on_begin_entry)
         self._run_controls.cancel_clicked.connect(self._on_cancel)
         self._run_controls.resume_clicked.connect(self._on_resume)
@@ -503,6 +530,9 @@ class MainWindow(QMainWindow):
         bottom = QWidget(self)
         bottom_layout = QVBoxLayout(bottom)
         bottom_layout.setContentsMargins(0, 0, 0, 0)
+        bottom_layout.setSpacing(2)
+        bottom_layout.addWidget(pending_label)
+        bottom_layout.addWidget(self._pending_pdfs_pane)
         bottom_layout.addWidget(self._audit_log, 1)
         bottom_layout.addWidget(self._run_controls)
 
@@ -516,6 +546,16 @@ class MainWindow(QMainWindow):
 
         self.setCentralWidget(outer_split)
 
+        # Status bar: text on the left, indeterminate-by-default progress
+        # bar on the right (hidden when idle). The progress strip is the
+        # operator's confirmation that an extraction or entry run is alive
+        # — see gui-fix-2 #2.
+        self._progress_bar = QProgressBar(self)
+        self._progress_bar.setMaximumWidth(220)
+        self._progress_bar.setVisible(False)
+        self._progress_bar.setRange(0, 0)  # indeterminate
+        self._progress_bar.setTextVisible(False)
+        self.statusBar().addPermanentWidget(self._progress_bar)
         self.statusBar().showMessage("Ready.")
 
     # -- First-run / API key flow -------------------------------------------
@@ -1005,24 +1045,13 @@ class MainWindow(QMainWindow):
         )
         if not files:
             return
-        # Copy PDFs into <client>/inputs/ so source-quote deep-links from
-        # state.json keep working even if the operator later moves or
-        # deletes the original file from their downloads folder.
-        import shutil
-
-        copied: list[Path] = []
-        for src in files:
-            src_path = Path(src)
-            dest = self._client.inputs_dir / src_path.name
-            try:
-                if src_path.resolve() != dest.resolve():
-                    shutil.copy2(src_path, dest)
-                copied.append(dest)
-            except OSError as exc:
-                _logger.warning("could not copy %s: %s", src_path, exc)
-
-        self._audit_log.append_event(f"Added {len(copied)} PDF(s) to inputs.")
-        self._launch_extraction(copied)
+        copied = self._copy_pdfs_to_inputs([Path(f) for f in files])
+        if not copied:
+            return
+        added = self._pending_pdfs_pane.add_paths(copied)
+        self._audit_log.append_event(
+            f"Queued {added} PDF(s) for extraction (total queued: {len(self._pending_pdfs_pane.paths())})."
+        )
 
     def dragEnterEvent(self, event) -> None:  # noqa: N802 (Qt-style)
         if event.mimeData().hasUrls():
@@ -1036,6 +1065,26 @@ class MainWindow(QMainWindow):
         files = [Path(u.toLocalFile()) for u in urls if u.toLocalFile().lower().endswith(".pdf")]
         if not files:
             return
+        copied = self._copy_pdfs_to_inputs(files)
+        if not copied:
+            return
+        added = self._pending_pdfs_pane.add_paths(copied)
+        self._audit_log.append_event(
+            f"Queued {added} dropped PDF(s) for extraction "
+            f"(total queued: {len(self._pending_pdfs_pane.paths())})."
+        )
+
+    def _copy_pdfs_to_inputs(self, files: list[Path]) -> list[Path]:
+        """Copy ``files`` into ``<client>/inputs/`` and return the destination paths.
+
+        Mirrors the prior inline behavior of ``_on_add_pdfs`` / ``dropEvent``.
+        Source-quote deep-links from state.json reference paths under
+        ``inputs/`` so we copy on intake — even though extraction now
+        queues, the copy still happens at intake time so the queue holds
+        canonical destination paths.
+        """
+        if self._client is None:
+            return []
         import shutil
 
         copied: list[Path] = []
@@ -1047,11 +1096,37 @@ class MainWindow(QMainWindow):
                 copied.append(dest)
             except OSError as exc:
                 _logger.warning("could not copy %s: %s", src, exc)
-        self._audit_log.append_event(f"Dropped {len(copied)} PDF(s) for extraction.")
-        self._launch_extraction(copied)
+        return copied
+
+    def _refresh_pending_pdfs_state(self) -> None:
+        """Sync the run-controls bar's view of queue size."""
+        count = self._pending_pdfs_pane.count()
+        self._run_controls.set_pending_pdf_count(count)
+
+    def _on_extract_clicked(self) -> None:
+        """Handler for the new Extract button. See gui-fix-2 #1."""
+        if self._client is None:
+            QMessageBox.information(self, "No client loaded", "Pick or create a client first.")
+            return
+        queued = self._pending_pdfs_pane.paths()
+        if not queued:
+            return
+        # Snapshot the queue and clear it before launching — if the worker
+        # spawn fails (e.g., extraction module not wired up) we restore.
+        self._launch_extraction(queued)
+        if self._worker_thread is not None:
+            # The worker accepted the job — clear the queue.
+            self._pending_pdfs_pane.clear_queue()
 
     def _launch_extraction(self, pdf_paths: list[Path]) -> None:
         if self._client is None or not pdf_paths:
+            return
+        if self._worker_thread is not None:
+            QMessageBox.information(
+                self,
+                "Already running",
+                "Another run is already in progress. Wait for it to finish or click Cancel.",
+            )
             return
         # Late import — extract.py may still be a stub; we just want to surface
         # the failure mode cleanly.
@@ -1074,10 +1149,11 @@ class MainWindow(QMainWindow):
             return
 
         force_opus = self._run_controls.is_force_opus()
+        pdf_count = len(pdf_paths)
 
         def task(worker: _CallableWorker) -> object:
             assert self._client is not None
-            worker.emit_progress(f"Extracting {len(pdf_paths)} PDF(s)...")
+            worker.emit_progress(f"Extracting {pdf_count} PDF(s)...")
             # extract.run_extraction signature: (client_name: str,
             # pdf_paths, force_opus=False, *, settings=None, ...). It
             # accepts no progress_callback — progress is logged via the
@@ -1089,6 +1165,9 @@ class MainWindow(QMainWindow):
                 settings=self._settings,
             )
 
+        self._active_run_kind = "extract"
+        self._run_controls.set_extracting(True)
+        self._show_progress_indeterminate(f"Extracting {pdf_count} PDF(s)...")
         self._spawn_worker(
             task,
             on_finished=self._on_extraction_finished,
@@ -1096,6 +1175,9 @@ class MainWindow(QMainWindow):
         )
 
     def _on_extraction_finished(self, _result: object) -> None:
+        self._run_controls.set_extracting(False)
+        self._active_run_kind = None
+        self._hide_progress("Extraction complete.")
         if self._client is None:
             return
         self._client.state = _safe_state_load(self._client.path)
@@ -1104,6 +1186,9 @@ class MainWindow(QMainWindow):
         self._refresh_run_controls()
 
     def _on_extraction_failed(self, message: str, technical: str) -> None:
+        self._run_controls.set_extracting(False)
+        self._active_run_kind = None
+        self._hide_progress("Extraction didn't finish.")
         QMessageBox.warning(
             self,
             "Extraction didn't finish",
@@ -1215,8 +1300,12 @@ class MainWindow(QMainWindow):
             worker.emit_progress("Entry session starting...")
 
             def progress(domain_tag: str, completed: int, total: int) -> None:
-                worker.emit_progress(
-                    f"Entering {domain_tag} ({completed + 1}/{total})..."
+                # ``completed`` is a 0-based index of the unit *about to
+                # start*; surface as 1-based for the operator.
+                worker.emit_progress_full(
+                    f"Entering {domain_tag} ({completed + 1}/{total})...",
+                    completed + 1,
+                    total,
                 )
 
             try:
@@ -1243,7 +1332,9 @@ class MainWindow(QMainWindow):
                     except Exception:  # noqa: BLE001
                         pass
 
+        self._active_run_kind = "entry"
         self._run_controls.set_entering(True)
+        self._show_progress_indeterminate("Entry session starting...")
         self._audit_log.append_event("Entry session started.")
         self._spawn_worker(
             task,
@@ -1352,6 +1443,8 @@ class MainWindow(QMainWindow):
     def _on_entry_finished(self, _result: object) -> None:
         self._run_controls.set_entering(False)
         self._run_controls.set_paused(False)
+        self._active_run_kind = None
+        self._hide_progress("Entry session complete.")
         self._audit_log.append_event("Entry session complete.")
         if self._client is not None:
             self._client.state = _safe_state_load(self._client.path)
@@ -1361,6 +1454,8 @@ class MainWindow(QMainWindow):
     def _on_entry_failed(self, message: str, technical: str) -> None:
         self._run_controls.set_entering(False)
         self._run_controls.set_paused(False)
+        self._active_run_kind = None
+        self._hide_progress("Entry didn't finish.")
         QMessageBox.warning(self, "Entry didn't finish", message)
         _logger.error("entry failed: %s | %s", message, technical)
 
@@ -1410,7 +1505,7 @@ class MainWindow(QMainWindow):
         worker = _CallableWorker(task)
         worker.moveToThread(thread)
 
-        worker.progress.connect(self._audit_log.append_event)
+        worker.progress.connect(self._on_worker_progress)
         worker.finished.connect(lambda result: (self._cleanup_worker(), on_finished(result)))
         worker.failed.connect(lambda msg, tech: (self._cleanup_worker(), on_failed(msg, tech)))
         thread.started.connect(worker.run)
@@ -1418,6 +1513,43 @@ class MainWindow(QMainWindow):
         self._worker_thread = thread
         self._worker = worker
         thread.start()
+
+    def _on_worker_progress(self, message: str, current: int, total: int) -> None:
+        """Receive progress events from the active worker.
+
+        Updates the status-bar text + progress bar, and mirrors the
+        message into the audit log (the prior single-arg connection's
+        behavior).
+        """
+        self._audit_log.append_event(message)
+        if total > 0:
+            self._show_progress_determinate(message, current, total)
+        else:
+            self._show_progress_indeterminate(message)
+
+    # -- Progress strip ----------------------------------------------------
+
+    def _show_progress_indeterminate(self, message: str) -> None:
+        """Show the progress bar in indeterminate mode + status-bar message."""
+        self._progress_bar.setRange(0, 0)
+        self._progress_bar.setVisible(True)
+        self.statusBar().showMessage(message)
+
+    def _show_progress_determinate(self, message: str, current: int, total: int) -> None:
+        """Show the progress bar with a known total."""
+        if total <= 0:
+            self._show_progress_indeterminate(message)
+            return
+        self._progress_bar.setRange(0, total)
+        self._progress_bar.setValue(min(current, total))
+        self._progress_bar.setVisible(True)
+        self.statusBar().showMessage(message)
+
+    def _hide_progress(self, idle_message: str = "Ready.") -> None:
+        """Hide the progress bar and reset the status-bar message."""
+        self._progress_bar.setVisible(False)
+        self._progress_bar.setRange(0, 0)
+        self.statusBar().showMessage(idle_message)
 
     def _cleanup_worker(self) -> None:
         if self._worker_thread is not None:
