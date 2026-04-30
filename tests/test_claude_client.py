@@ -1280,3 +1280,229 @@ def test_unknown_tool_name_warned_and_skipped(
     assert len(result) == 1
     unexpected = [r for r in caplog.records if "unexpected_tool" in r.getMessage()]
     assert len(unexpected) == 1
+
+
+# ============================================================================
+# Bug 7 regression — per-call usage attached to returned list
+# ============================================================================
+
+
+def test_extract_from_pdf_attaches_cache_usage_to_returned_list(
+    fake_anthropic: MagicMock,
+    stub_field_map: StubFieldMap,
+    small_pdf: Path,
+) -> None:
+    """Bug 7 fix: claude_client must attach a cache_usage block to its
+    returned list so extract.py can aggregate cache + token totals.
+
+    Before the fix, the per-call numbers were only logged at INFO and
+    never propagated; the run-end aggregate showed all zeros even on
+    a successful run with real billing.
+    """
+    fake_anthropic.messages.create.return_value = FakeMessage(
+        tool_uses=[
+            make_tool_use(
+                domain_tag="account.named_insured", value="X", confidence=0.95
+            )
+        ],
+        usage=FakeUsage(
+            input_tokens=23_217,
+            output_tokens=175,
+            cache_creation_input_tokens=42_772,
+            cache_read_input_tokens=0,
+        ),
+    )
+
+    result = extract_from_pdf(
+        small_pdf,
+        stub_field_map,
+        glossary="g",
+        system_prompt="s",
+        run_id="run-usage",
+    )
+
+    usage = getattr(result, "cache_usage", None)
+    assert usage is not None, "extract_from_pdf must attach cache_usage"
+    # Match the exact numbers from the operator's diagnostic run.
+    assert usage.input_tokens == 23_217
+    assert usage.output_tokens == 175
+    assert usage.cache_creation_input_tokens == 42_772
+    assert usage.cache_read_input_tokens == 0
+    assert usage.api_calls == 1
+
+
+def test_extract_from_pdf_sums_usage_across_split_chunks(
+    fake_anthropic: MagicMock,
+    stub_field_map: StubFieldMap,
+    large_pdf: Path,
+) -> None:
+    """For a multi-chunk PDF, cache_usage on the returned list must equal
+    the per-chunk totals summed across all chunks. Bug 7 regression."""
+    fake_anthropic.messages.create.side_effect = [
+        FakeMessage(
+            tool_uses=[
+                make_tool_use(
+                    domain_tag="account.named_insured", value=f"v{i}", confidence=0.9
+                )
+            ],
+            usage=FakeUsage(
+                input_tokens=1_000 * (i + 1),
+                output_tokens=100 * (i + 1),
+                cache_creation_input_tokens=10_000 * (i + 1),
+                cache_read_input_tokens=5_000 * (i + 1),
+            ),
+        )
+        for i in range(3)
+    ]
+
+    result = extract_from_pdf(
+        large_pdf,
+        stub_field_map,
+        glossary="g",
+        system_prompt="s",
+        run_id="run-multi-chunk",
+    )
+
+    usage = getattr(result, "cache_usage", None)
+    assert usage is not None
+    assert usage.api_calls == 3
+    # 1000 + 2000 + 3000
+    assert usage.input_tokens == 6_000
+    # 100 + 200 + 300
+    assert usage.output_tokens == 600
+    # 10000 + 20000 + 30000
+    assert usage.cache_creation_input_tokens == 60_000
+    # 5000 + 10000 + 15000
+    assert usage.cache_read_input_tokens == 30_000
+
+
+def test_reextract_low_confidence_fields_attaches_cache_usage(
+    fake_anthropic: MagicMock,
+    stub_field_map: StubFieldMap,
+    small_pdf: Path,
+) -> None:
+    """Re-extract path must propagate usage too — Opus calls cost more
+    so the operator-visible aggregate especially matters here."""
+    fake_anthropic.messages.create.return_value = FakeMessage(
+        model=DEFAULT_OPUS_MODEL,
+        tool_uses=[
+            make_tool_use(
+                domain_tag="vehicle.vin", value="VIN", confidence=0.95
+            )
+        ],
+        usage=FakeUsage(
+            input_tokens=8_000,
+            output_tokens=200,
+            cache_creation_input_tokens=0,
+            cache_read_input_tokens=42_000,
+        ),
+    )
+
+    targets = [
+        ExtractedField(
+            domain_tag="vehicle.vin",
+            value="VINBAD",
+            source_doc="small.pdf",
+            source_page=1,
+            source_quote="q",
+            confidence=0.4,
+            model_used=DEFAULT_SONNET_MODEL,
+        ),
+    ]
+    result = reextract_low_confidence_fields(
+        targets,
+        small_pdf,
+        stub_field_map,
+        system_prompt="s",
+        run_id="run-reext-usage",
+        glossary="g",
+    )
+
+    usage = getattr(result, "cache_usage", None)
+    assert usage is not None
+    assert usage.api_calls == 1
+    assert usage.cache_read_input_tokens == 42_000
+    assert usage.input_tokens == 8_000
+
+
+def test_extract_from_pdf_includes_opus_escalation_in_usage_total(
+    fake_anthropic: MagicMock,
+    stub_field_map: StubFieldMap,
+    small_pdf: Path,
+) -> None:
+    """When auto-escalation kicks in (Sonnet → Opus), the returned
+    cache_usage must include BOTH the Sonnet first-pass and the Opus
+    second-pass numbers."""
+    sonnet_response = FakeMessage(
+        tool_uses=[
+            make_tool_use(
+                domain_tag="vehicle.vin",
+                value="XYZ",
+                confidence=0.5,  # below threshold → escalate
+                repeatable_group="vehicle",
+                repeatable_index=0,
+            ),
+        ],
+        usage=FakeUsage(
+            input_tokens=10_000,
+            output_tokens=300,
+            cache_creation_input_tokens=20_000,
+            cache_read_input_tokens=0,
+        ),
+    )
+    opus_response = FakeMessage(
+        model=DEFAULT_OPUS_MODEL,
+        tool_uses=[
+            make_tool_use(
+                domain_tag="vehicle.vin",
+                value="GOOD_VIN",
+                confidence=0.95,
+                repeatable_group="vehicle",
+                repeatable_index=0,
+            ),
+        ],
+        usage=FakeUsage(
+            input_tokens=3_000,
+            output_tokens=120,
+            cache_creation_input_tokens=0,
+            cache_read_input_tokens=20_000,
+        ),
+    )
+    fake_anthropic.messages.create.side_effect = [sonnet_response, opus_response]
+
+    result = extract_from_pdf(
+        small_pdf,
+        stub_field_map,
+        glossary="g",
+        system_prompt="s",
+        run_id="run-esc-usage",
+    )
+
+    usage = getattr(result, "cache_usage", None)
+    assert usage is not None
+    assert usage.api_calls == 2
+    assert usage.input_tokens == 13_000
+    assert usage.output_tokens == 420
+    assert usage.cache_creation_input_tokens == 20_000
+    assert usage.cache_read_input_tokens == 20_000
+
+
+# ============================================================================
+# Bug 8 regression — tool description & system prompt instruct parallel calls
+# ============================================================================
+
+
+def test_tool_description_explicitly_requests_parallel_tool_use(
+    stub_field_map: StubFieldMap,
+) -> None:
+    """Bug 8 fix: the tool description must tell Claude to emit MANY
+    parallel tool_use calls in a single response, not one and stop."""
+    schema = build_record_field_tool_schema(stub_field_map)
+    desc = schema["description"]
+    # Lowercase comparison to keep the assertion resilient to minor
+    # rewording — the SEMANTIC requirement is "parallel, many per response".
+    desc_lower = desc.lower()
+    assert "parallel" in desc_lower
+    assert "many" in desc_lower
+    # Explicit anti-pattern callout: don't stop after one.
+    assert "do not stop" in desc_lower or "continue" in desc_lower

@@ -135,6 +135,68 @@ class ExtractedField:
     model_used: str = DEFAULT_SONNET_MODEL
 
 
+@dataclass(slots=True, kw_only=True)
+class _CallUsage:
+    """Per-call (or summed-across-chunks) Anthropic usage block.
+
+    Attached to the ``list`` returned by :func:`extract_from_pdf` /
+    :func:`reextract_low_confidence_fields` so ``extract.py`` can
+    aggregate cache + token usage across documents without re-reading
+    the SDK Message objects (which are already discarded by the time
+    extract sees the records).
+
+    Bug 7 fix: previously these numbers were only logged at INFO and
+    never propagated, so ``extract.run_end`` reported all zeros even
+    on a successful run with real billing.
+    """
+
+    cache_creation_input_tokens: int = 0
+    cache_read_input_tokens: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
+    api_calls: int = 0
+
+    def add(self, other: "_CallUsage") -> None:
+        """In-place sum of ``other`` into ``self``."""
+        self.cache_creation_input_tokens += other.cache_creation_input_tokens
+        self.cache_read_input_tokens += other.cache_read_input_tokens
+        self.input_tokens += other.input_tokens
+        self.output_tokens += other.output_tokens
+        self.api_calls += other.api_calls
+
+
+class _RecordsList(list):  # noqa: SLOT000 - list subclass needs __dict__ for cache_usage
+    """``list`` subclass that carries a ``cache_usage`` attribute.
+
+    The extraction-agent reads this via ``getattr(records, "cache_usage", None)``
+    (see ``extract.py``) — keeping the wire shape as a plain list keeps the
+    public contract stable while letting us hang per-call usage off the
+    return value.
+    """
+
+    cache_usage: _CallUsage | None = None
+
+
+def _usage_from_response(response: Any) -> _CallUsage:
+    """Build a :class:`_CallUsage` from an Anthropic ``Message.usage`` block.
+
+    All fields default to zero on missing/None values so a partial SDK
+    response (or a test stub) doesn't blow up the aggregation.
+    """
+    usage = getattr(response, "usage", None)
+    return _CallUsage(
+        cache_creation_input_tokens=int(
+            getattr(usage, "cache_creation_input_tokens", 0) or 0
+        ),
+        cache_read_input_tokens=int(
+            getattr(usage, "cache_read_input_tokens", 0) or 0
+        ),
+        input_tokens=int(getattr(usage, "input_tokens", 0) or 0),
+        output_tokens=int(getattr(usage, "output_tokens", 0) or 0),
+        api_calls=1,
+    )
+
+
 # ----- FieldMap protocol ------------------------------------------------------
 
 
@@ -185,11 +247,14 @@ def build_record_field_tool_schema(field_map: FieldMap) -> dict[str, Any]:
     return {
         "name": "record_extracted_field",
         "description": (
-            "Record one extracted insurance field, keyed by its domain_tag. "
-            "Call this tool once per discrete field you find in the PDF. "
-            "If the same field appears multiple times in a repeatable group "
-            "(e.g., a vehicle schedule), call it once per group item with "
-            "repeatable_group and repeatable_index set."
+            "Record ONE extracted insurance field per call. A typical insurance "
+            "dec page or schedule contains 20-60 distinct fields. You should emit "
+            "MANY parallel tool_use calls in a single response — one for EACH "
+            "field you find. Do not stop after recording a single field. Continue "
+            "emitting record_extracted_field tool calls until every extractable "
+            "field in the document has been recorded. Repeatable items (vehicles, "
+            "drivers, locations, loss payees) get one call per item with "
+            "repeatable_group + repeatable_index set."
         ),
         "input_schema": {
             "type": "object",
@@ -1029,8 +1094,12 @@ def _extract_one_chunk(
     model: str,
     user_instruction: str,
     cache_miss_reason_hint: str | None = None,
-) -> list[ExtractedField]:
-    """Run extraction on a single chunk; handle retries, cache logging, debug."""
+) -> tuple[list[ExtractedField], _CallUsage]:
+    """Run extraction on a single chunk; handle retries, cache logging, debug.
+
+    Returns the parsed records together with a :class:`_CallUsage` block
+    so the caller can sum cache + token usage across chunks (Bug 7 fix).
+    """
     request = _build_request(
         pdf_chunk=chunk,
         field_map=ctx.field_map,
@@ -1081,7 +1150,9 @@ def _extract_one_chunk(
     # the cache; subsequent calls are expected to hit it.
     ctx.expected_cached = True
 
-    return _extract_tool_use_records(response, pdf_chunk=chunk, model=model)
+    records = _extract_tool_use_records(response, pdf_chunk=chunk, model=model)
+    usage = _usage_from_response(response)
+    return records, usage
 
 
 # ----- Merge across chunks ---------------------------------------------------
@@ -1176,9 +1247,10 @@ def extract_from_pdf(
     )
 
     chunk_records: list[list[ExtractedField]] = []
+    aggregate_usage = _CallUsage()
     for idx, chunk in enumerate(chunks):
         # First call of the run can't possibly hit the cache; subsequent calls can.
-        chunk_recs = _extract_one_chunk(
+        chunk_recs, chunk_usage = _extract_one_chunk(
             chunk,
             ctx=ctx,
             model=initial_model,
@@ -1188,12 +1260,16 @@ def extract_from_pdf(
             ),
         )
         chunk_records.append(chunk_recs)
+        aggregate_usage.add(chunk_usage)
 
     first_pass = _merge_chunk_records(chunk_records)
 
     if force_opus:
         # Already Opus; tag and return.
-        return [_with_model(rec, DEFAULT_OPUS_MODEL) for rec in first_pass]
+        return _attach_usage(
+            [_with_model(rec, DEFAULT_OPUS_MODEL) for rec in first_pass],
+            aggregate_usage,
+        )
 
     # Two-pass escalation: Sonnet is fast and cheap, but Opus catches the
     # fields Sonnet flagged as low-confidence / missing-required. We only
@@ -1201,7 +1277,7 @@ def extract_from_pdf(
     # tokens with no payoff for fields Sonnet was already sure about.
     needs_escalation = _select_for_escalation(first_pass, field_map=field_map)
     if not needs_escalation:
-        return first_pass
+        return _attach_usage(first_pass, aggregate_usage)
 
     logger.info(
         "claude.escalation run_id=%s doc=%s candidates=%d",
@@ -1213,13 +1289,17 @@ def extract_from_pdf(
     # Second pass: Opus on un-resolved fields. We pass the original PDF
     # path (un-split — Opus accepts the same 32 MB / 80 pp limits, so we
     # split again if needed inside reextract_low_confidence_fields).
-    opus_records = _reextract_against_opus(
+    opus_records, opus_usage = _reextract_against_opus(
         target_fields=needs_escalation,
         pdf_path=pdf_path,
         ctx=ctx,
     )
+    aggregate_usage.add(opus_usage)
 
-    return _merge_first_pass_with_opus(first_pass, opus_records)
+    return _attach_usage(
+        _merge_first_pass_with_opus(first_pass, opus_records),
+        aggregate_usage,
+    )
 
 
 def reextract_low_confidence_fields(
@@ -1259,12 +1339,13 @@ def reextract_low_confidence_fields(
         tool_schema=tool_schema,
     )
 
-    return _reextract_against_opus(
+    opus_records, opus_usage = _reextract_against_opus(
         target_fields=fields,
         pdf_path=pdf_path,
         ctx=ctx,
         prebuilt_chunks=chunks,
     )
+    return _attach_usage(opus_records, opus_usage)
 
 
 def _reextract_against_opus(
@@ -1273,8 +1354,12 @@ def _reextract_against_opus(
     pdf_path: Path,
     ctx: _CallContext,
     prebuilt_chunks: Sequence[_PdfChunk] | None = None,
-) -> list[ExtractedField]:
-    """Run Opus 4.7 on the document, asking only about the supplied fields."""
+) -> tuple[list[ExtractedField], _CallUsage]:
+    """Run Opus 4.7 on the document, asking only about the supplied fields.
+
+    Returns ``(records, usage)`` so the caller can fold the Opus call's
+    cache + token usage into the per-doc aggregate (Bug 7 fix).
+    """
     chunks = (
         list(prebuilt_chunks)
         if prebuilt_chunks is not None
@@ -1285,19 +1370,21 @@ def _reextract_against_opus(
     instruction = _opus_reextract_instruction(target_fields)
 
     chunk_records: list[list[ExtractedField]] = []
+    aggregate_usage = _CallUsage()
     for chunk in chunks:
-        recs = _extract_one_chunk(
+        recs, usage = _extract_one_chunk(
             chunk,
             ctx=ctx,
             model=DEFAULT_OPUS_MODEL,
             user_instruction=instruction,
             cache_miss_reason_hint=None,
         )
+        aggregate_usage.add(usage)
         # Only keep records that match a requested tag.
         chunk_records.append([r for r in recs if r.domain_tag in set(target_tags)])
 
     merged = _merge_chunk_records(chunk_records)
-    return [_with_model(r, DEFAULT_OPUS_MODEL) for r in merged]
+    return [_with_model(r, DEFAULT_OPUS_MODEL) for r in merged], aggregate_usage
 
 
 def _opus_reextract_instruction(target_fields: Sequence[ExtractedField]) -> str:
@@ -1394,3 +1481,19 @@ def _merge_first_pass_with_opus(
 def _with_model(rec: ExtractedField, model: str) -> ExtractedField:
     """Return a copy of ``rec`` with ``model_used`` set to ``model``."""
     return dataclasses.replace(rec, model_used=model)
+
+
+def _attach_usage(
+    records: Sequence[ExtractedField],
+    usage: _CallUsage,
+) -> _RecordsList:
+    """Wrap ``records`` in a :class:`_RecordsList` with ``cache_usage`` set.
+
+    The extraction-agent reads this attribute via
+    ``getattr(records, "cache_usage", None)`` (see ``extract.py``
+    line ~820). Returning a list subclass keeps the public contract
+    (a list of ExtractedField) backward-compatible.
+    """
+    out = _RecordsList(records)
+    out.cache_usage = usage
+    return out

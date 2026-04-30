@@ -897,6 +897,37 @@ def test_default_glossary_clears_2048_token_cache_minimum_combined() -> None:
         assert term in glossary_lower, f"missing term: {term}"
 
 
+def test_default_system_prompt_has_output_protocol_section() -> None:
+    """Bug 8 regression: the system prompt must explicitly tell Claude to
+    emit MANY parallel record_extracted_field tool_use calls in a single
+    response. Without this, Sonnet conservatively emits one tool_use and
+    stops, returning just a single field per PDF (the diagnostic
+    'output=175 tokens, 1 field extracted on a 30-field page' bug).
+    """
+    text = extract._DEFAULT_SYSTEM_PROMPT
+    text_lower = text.lower()
+    # Header for the section.
+    assert "output protocol" in text_lower
+    # Semantic requirements: parallel, many calls per response.
+    assert "parallel" in text_lower
+    assert "multiple" in text_lower or "many" in text_lower
+    # Anti-pattern: don't stop at one.
+    assert "do not emit a single" in text_lower or "do not stop" in text_lower
+    # Repeatable-group guidance lives in this section so Claude sees it
+    # in the most-prominent position.
+    assert "repeatable_group" in text
+    assert "repeatable_index" in text
+    # Token-budget sanity: the new section adds ~200 tokens; the prompt
+    # must still clear the 2048-token cache minimum (already covered by
+    # the test above, but we re-assert here so a regression that drops
+    # the protocol section trips THIS test rather than the more general
+    # one).
+    approx_tokens = len(text) // 4
+    assert approx_tokens > 2048, (
+        f"system prompt with OUTPUT PROTOCOL only ~{approx_tokens} tokens"
+    )
+
+
 # --------------------------------------------------------------------------- #
 # Test-isolation canary (Bug 1)
 # --------------------------------------------------------------------------- #
@@ -995,3 +1026,129 @@ def test_cache_stats_aggregate_across_docs(
     assert result.cache_stats.cache_read_input_tokens == 72341
     assert result.cache_stats.input_tokens == 1400
     assert result.cache_stats.output_tokens == 380
+
+
+def test_cache_stats_aggregates_real_records_list_from_claude_client(
+    monkeypatch: pytest.MonkeyPatch,
+    settings: config.Settings,
+    fake_pdfs: list[Path],
+) -> None:
+    """Bug 7 end-to-end regression: when claude_client returns its real
+    ``_RecordsList`` (a list subclass) with a ``_CallUsage`` dataclass on
+    the ``cache_usage`` attribute, extract.run_extraction must aggregate
+    the totals correctly into ``ExtractionResult.cache_stats``.
+
+    Previously the per-call numbers were captured in claude_client._log_call
+    but never propagated, so the run-end aggregate showed all zeros even on
+    a successful run with real billing (the operator's diagnostic showed
+    cache_creation=42772 per-call but cache_creation=0 / api_calls=0
+    aggregate).
+    """
+    rec_a = FakeExtractedField(
+        domain_tag="account.named_insured",
+        value="A",
+        source_doc="a.pdf",
+        source_page=1,
+        source_quote="Named Insured: A",
+        confidence=0.95,
+    )
+    rec_b = FakeExtractedField(
+        domain_tag="account.named_insured",
+        value="B",
+        source_doc="b.pdf",
+        source_page=1,
+        source_quote="Named Insured: B",
+        confidence=0.95,
+    )
+    # Use the exact shapes claude_client now returns: a _RecordsList with
+    # a _CallUsage dataclass on .cache_usage. The accumulator must accept
+    # attribute-bearing objects (not just dicts) — this is the contract
+    # extract.py's _accumulate_cache_stats was already designed for.
+    list_a = claude_client_mod._RecordsList([rec_a])
+    list_a.cache_usage = claude_client_mod._CallUsage(
+        cache_creation_input_tokens=42_772,
+        cache_read_input_tokens=0,
+        input_tokens=23_217,
+        output_tokens=175,
+        api_calls=1,
+    )
+    list_b = claude_client_mod._RecordsList([rec_b])
+    list_b.cache_usage = claude_client_mod._CallUsage(
+        cache_creation_input_tokens=0,
+        cache_read_input_tokens=42_772,
+        input_tokens=1_500,
+        output_tokens=120,
+        api_calls=1,
+    )
+
+    fake_state = FakeState("Bobby")
+    fake_fm = FakeFieldMap(["account.named_insured"])
+    _wire_fakes(
+        monkeypatch,
+        fake_state=fake_state,
+        fake_fm=fake_fm,
+        extract_returns=[list_a, list_b],
+    )
+
+    result = extract.run_extraction("Bobby", fake_pdfs, settings=settings)
+
+    # Each per-doc call counts as one api_calls increment in
+    # _accumulate_cache_stats — the per-call _CallUsage already carries
+    # api_calls=1 inside, but the extraction-agent treats one Claude
+    # round-trip per PDF as the unit.
+    assert result.cache_stats.api_calls == 2
+    assert result.cache_stats.cache_creation_input_tokens == 42_772
+    assert result.cache_stats.cache_read_input_tokens == 42_772
+    assert result.cache_stats.input_tokens == 23_217 + 1_500
+    assert result.cache_stats.output_tokens == 175 + 120
+
+
+def test_cache_stats_aggregates_multi_chunk_call_usage(
+    monkeypatch: pytest.MonkeyPatch,
+    settings: config.Settings,
+    fake_pdfs: list[Path],
+) -> None:
+    """When claude_client sums usage across PDF split chunks before
+    returning, extract.py treats the resulting ``_CallUsage`` as a single
+    aggregated object — the api_calls counter on the dataclass already
+    reflects the chunk count, but the extraction-agent's own api_calls
+    counter still ticks once per PDF (one extract_from_pdf invocation =
+    one logical 'doc'). The cache + input/output token totals from the
+    chunk sum still flow through faithfully."""
+    rec = FakeExtractedField(
+        domain_tag="account.named_insured",
+        value="MultiChunk",
+        source_doc="big.pdf",
+        source_page=1,
+        source_quote="...",
+        confidence=0.95,
+    )
+    # Simulate the result of summing 3 chunk usages inside claude_client.
+    summed = claude_client_mod._CallUsage(
+        cache_creation_input_tokens=60_000,
+        cache_read_input_tokens=30_000,
+        input_tokens=6_000,
+        output_tokens=600,
+        api_calls=3,
+    )
+    records = claude_client_mod._RecordsList([rec])
+    records.cache_usage = summed
+
+    fake_state = FakeState("Bobby")
+    fake_fm = FakeFieldMap(["account.named_insured"])
+    _wire_fakes(
+        monkeypatch,
+        fake_state=fake_state,
+        fake_fm=fake_fm,
+        extract_returns=[records],
+    )
+
+    result = extract.run_extraction(
+        "Bobby", [fake_pdfs[0]], settings=settings
+    )
+
+    # Per-doc cache stats must reflect the summed totals from the chunks.
+    assert result.cache_stats.cache_creation_input_tokens == 60_000
+    assert result.cache_stats.cache_read_input_tokens == 30_000
+    assert result.cache_stats.input_tokens == 6_000
+    assert result.cache_stats.output_tokens == 600
