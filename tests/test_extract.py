@@ -869,7 +869,12 @@ def test_default_system_prompt_clears_2048_token_cache_minimum() -> None:
     assert "needs_review" in extract._DEFAULT_SYSTEM_PROMPT
     assert "source_quote" in extract._DEFAULT_SYSTEM_PROMPT
     assert "confidence" in extract._DEFAULT_SYSTEM_PROMPT
-    assert "record_extracted_field" in extract._DEFAULT_SYSTEM_PROMPT
+    # JSON-mode contract: the prompt must instruct Claude to emit a JSON
+    # object with `fields` and `repeatables` blocks. Tool-use language
+    # (`record_extracted_field`) was removed in fix-pass-4.
+    assert "JSON" in extract._DEFAULT_SYSTEM_PROMPT
+    assert "fields" in extract._DEFAULT_SYSTEM_PROMPT
+    assert "repeatables" in extract._DEFAULT_SYSTEM_PROMPT
 
 
 def test_default_glossary_clears_2048_token_cache_minimum_combined() -> None:
@@ -897,39 +902,57 @@ def test_default_glossary_clears_2048_token_cache_minimum_combined() -> None:
         assert term in glossary_lower, f"missing term: {term}"
 
 
-def test_default_system_prompt_has_output_protocol_section() -> None:
-    """fix-pass-3: the system prompt must describe the iterative tool-use
-    loop accurately — Sonnet 4.6 emits one tool_use per response and the
-    pipeline drives the multi-turn agentic loop documented at
-    https://docs.anthropic.com/en/docs/build-with-claude/tool-use.
+def test_default_system_prompt_has_output_format_section() -> None:
+    """fix-pass-4: the system prompt must describe the JSON-mode output
+    contract accurately — Claude returns one JSON object per call with
+    every extractable field. Tool use is no longer used; the OUTPUT
+    FORMAT section embeds the literal expected schema so the model has
+    no excuse to drift to prose.
 
-    Without this section Claude doesn't know it can keep going; it
-    extracts one field and stops (the 'output=175 tokens, 1 field
-    extracted on a 30-field page' bug from fix-pass-2 diagnostics).
+    Without this section Claude wraps the response in markdown fences,
+    emits commentary, or returns one field at a time — all of which break
+    the parser. The fix-pass-3 'iterative tool-use loop' wording was
+    removed because Sonnet 4.6 didn't honor it reliably even with a
+    single-tool schema.
     """
     text = extract._DEFAULT_SYSTEM_PROMPT
     text_lower = text.lower()
-    # Header for the section.
-    assert "output protocol" in text_lower
-    # Semantic requirements: iterative tool-use loop with continue-until-done.
-    assert "loop" in text_lower
-    assert "iterative" in text_lower or "multi-turn" in text_lower
-    # Anti-pattern: don't stop early.
+    # Header for the new section.
+    assert "output format" in text_lower
+    # JSON-mode contract: the schema is described literally and the
+    # response shape is named.
+    assert "json" in text_lower
+    # The two top-level keys of the response object must be documented
+    # so Claude knows what to emit.
+    assert "fields" in text
+    assert "repeatables" in text
+    # The seven repeatable group names the parser recognizes.
+    for group in (
+        "vehicle",
+        "driver",
+        "location",
+        "loss_payee",
+        "additional_insured",
+        "prior_carrier",
+        "loss",
+    ):
+        assert group in text_lower, f"missing repeatable group: {group}"
+    # Anti-pattern: do not stop early on a 20-60-field page.
     assert "do not stop" in text_lower or "every extractable field" in text_lower
-    # End-turn-when-done callout (the loop's exit condition).
-    assert "end your turn" in text_lower
-    # Repeatable-group guidance lives in this section so Claude sees it
-    # in the most-prominent position.
-    assert "repeatable_group" in text
-    assert "repeatable_index" in text
-    # Token-budget sanity: the new section adds ~200 tokens; the prompt
-    # must still clear the 2048-token cache minimum (already covered by
-    # the test above, but we re-assert here so a regression that drops
-    # the protocol section trips THIS test rather than the more general
-    # one).
+    # Anti-pattern: do not wrap in markdown fences (a common Claude
+    # JSON-mode failure mode).
+    assert (
+        "markdown" in text_lower
+        or "```" in text
+        or "code fences" in text_lower
+        or "code fence" in text_lower
+    )
+    # Token-budget sanity: the new section adds ~600 tokens (more than
+    # tool-use protocol because it embeds a worked example); the prompt
+    # must still clear the 2048-token cache minimum.
     approx_tokens = len(text) // 4
     assert approx_tokens > 2048, (
-        f"system prompt with OUTPUT PROTOCOL only ~{approx_tokens} tokens"
+        f"system prompt with OUTPUT FORMAT only ~{approx_tokens} tokens"
     )
 
 

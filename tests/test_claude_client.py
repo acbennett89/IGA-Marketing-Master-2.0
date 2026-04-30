@@ -3,6 +3,11 @@
 The Anthropic SDK is mocked at every entry point — no real API calls are
 made, no real API keys are read. ``secret_store.get_anthropic_api_key`` is
 monkeypatched to a stub for tests that exercise the public API.
+
+The module operates in JSON-mode output (NOT tool use): the system prompt
+embeds the literal expected JSON schema and Claude returns one JSON object
+as text content per call. These tests fake that text content via
+:class:`FakeMessage` whose ``content`` carries a single ``FakeTextBlock``.
 """
 
 from __future__ import annotations
@@ -30,14 +35,12 @@ import anthropic  # noqa: E402  (after sys.path manipulation)
 
 from iga_marketing_master_2 import claude_client  # noqa: E402
 from iga_marketing_master_2.claude_client import (  # noqa: E402
-    CONFIDENCE_LOW_THRESHOLD,
     DEFAULT_OPUS_MODEL,
     DEFAULT_SONNET_MODEL,
     ClaudeAuthError,
+    ClaudeParseError,
     ClaudeRateLimitError,
-    ClaudeServerError,
     ExtractedField,
-    build_record_field_tool_schema,
     extract_from_pdf,
     reextract_low_confidence_fields,
 )
@@ -90,18 +93,22 @@ class FakeUsage:
         self.cache_read_input_tokens = cache_read_input_tokens
 
 
-class FakeToolUseBlock:
-    def __init__(self, name: str, input_payload: dict[str, Any]) -> None:
-        self.type = "tool_use"
-        self.name = name
-        self.input = input_payload
+class FakeTextBlock:
+    """Stand-in for an Anthropic ``TextBlock`` returned in JSON mode."""
+
+    def __init__(self, text: str) -> None:
+        self.type = "text"
+        self.text = text
 
 
 class FakeMessage:
+    """Stand-in for an Anthropic ``Message`` carrying a single text block."""
+
     def __init__(
         self,
         *,
-        tool_uses: list[FakeToolUseBlock] | None = None,
+        text: str | None = None,
+        content_blocks: list[Any] | None = None,
         usage: FakeUsage | None = None,
         model: str = DEFAULT_SONNET_MODEL,
         stop_reason: str = "end_turn",
@@ -112,7 +119,12 @@ class FakeMessage:
         self.type = "message"
         self.stop_reason = stop_reason
         self.stop_sequence = None
-        self.content = list(tool_uses or [])
+        if content_blocks is not None:
+            self.content = list(content_blocks)
+        elif text is not None:
+            self.content = [FakeTextBlock(text)]
+        else:
+            self.content = [FakeTextBlock("{\"fields\": {}, \"repeatables\": {}}")]
         self.usage = usage or FakeUsage()
 
     def model_dump(self) -> dict[str, Any]:
@@ -121,7 +133,8 @@ class FakeMessage:
             "model": self.model,
             "stop_reason": self.stop_reason,
             "content": [
-                {"type": b.type, "name": b.name, "input": b.input} for b in self.content
+                {"type": getattr(b, "type", None), "text": getattr(b, "text", None)}
+                for b in self.content
             ],
             "usage": {
                 "input_tokens": self.usage.input_tokens,
@@ -132,33 +145,50 @@ class FakeMessage:
         }
 
 
-def make_tool_use(
+def make_field_entry(
     *,
-    domain_tag: str,
     value: Any,
     confidence: float,
-    source_doc: str = "x.pdf",
     source_page: int = 1,
     source_quote: str = "...",
     needs_review: bool = False,
-    repeatable_group: str | None = None,
-    repeatable_index: int | None = None,
-) -> FakeToolUseBlock:
-    payload: dict[str, Any] = {
-        "domain_tag": domain_tag,
+) -> dict[str, Any]:
+    """Build a single ``fields[<tag>]`` entry payload."""
+    return {
         "value": value,
-        "source_doc": source_doc,
+        "confidence": confidence,
         "source_page": source_page,
         "source_quote": source_quote,
-        "confidence": confidence,
+        "needs_review": needs_review,
     }
-    if needs_review:
-        payload["needs_review"] = True
-    if repeatable_group is not None:
-        payload["repeatable_group"] = repeatable_group
-    if repeatable_index is not None:
-        payload["repeatable_index"] = repeatable_index
-    return FakeToolUseBlock("record_extracted_field", payload)
+
+
+def build_response_text(
+    fields: dict[str, dict[str, Any]] | None = None,
+    repeatables: dict[str, list[dict[str, Any]]] | None = None,
+) -> str:
+    """Serialize a JSON-mode response payload."""
+    payload: dict[str, Any] = {
+        "fields": fields or {},
+        "repeatables": repeatables or {},
+    }
+    return json.dumps(payload)
+
+
+def make_simple_message(
+    *,
+    fields: dict[str, dict[str, Any]] | None = None,
+    repeatables: dict[str, list[dict[str, Any]]] | None = None,
+    usage: FakeUsage | None = None,
+    model: str = DEFAULT_SONNET_MODEL,
+    stop_reason: str = "end_turn",
+) -> FakeMessage:
+    return FakeMessage(
+        text=build_response_text(fields=fields, repeatables=repeatables),
+        usage=usage,
+        model=model,
+        stop_reason=stop_reason,
+    )
 
 
 # ============================================================================
@@ -230,32 +260,53 @@ def fake_anthropic(monkeypatch: pytest.MonkeyPatch):
 
 
 # ============================================================================
-# Tool schema tests
+# JSON-mode parser helpers
 # ============================================================================
 
 
-def test_tool_schema_uses_field_map_enum(stub_field_map: StubFieldMap) -> None:
-    schema = build_record_field_tool_schema(stub_field_map)
-    assert schema["name"] == "record_extracted_field"
-    domain_tag_prop = schema["input_schema"]["properties"]["domain_tag"]
-    assert "enum" in domain_tag_prop
-    assert domain_tag_prop["enum"] == sorted(stub_field_map.domain_tags)
-    # Required fields per ARCHITECTURE.md §6.2.
-    assert set(schema["input_schema"]["required"]) == {
-        "domain_tag",
-        "value",
-        "source_doc",
-        "source_page",
-        "source_quote",
-        "confidence",
-    }
+def test_parse_json_object_strips_markdown_fences() -> None:
+    raw = '```json\n{"fields": {"a.b": {"value": 1, "confidence": 0.9, ' \
+          '"source_page": 1, "source_quote": "x"}}}\n```'
+    parsed = claude_client._parse_json_object(raw)
+    assert "fields" in parsed
+    assert parsed["fields"]["a.b"]["value"] == 1
 
 
-def test_tool_schema_omits_enum_when_field_map_empty() -> None:
-    schema = build_record_field_tool_schema(StubFieldMap())
-    domain_tag_prop = schema["input_schema"]["properties"]["domain_tag"]
-    assert "enum" not in domain_tag_prop
-    assert domain_tag_prop["type"] == "string"
+def test_parse_json_object_strips_bare_fence() -> None:
+    raw = '```\n{"fields": {}}\n```'
+    parsed = claude_client._parse_json_object(raw)
+    assert parsed == {"fields": {}}
+
+
+def test_parse_json_object_unwraps_single_element_list() -> None:
+    raw = '[{"fields": {}, "repeatables": {}}]'
+    parsed = claude_client._parse_json_object(raw)
+    assert parsed == {"fields": {}, "repeatables": {}}
+
+
+def test_parse_json_object_raises_on_invalid_json() -> None:
+    with pytest.raises(ClaudeParseError):
+        claude_client._parse_json_object("not json {{{")
+
+
+def test_parse_json_object_raises_on_empty_string() -> None:
+    with pytest.raises(ClaudeParseError):
+        claude_client._parse_json_object("")
+
+
+def test_parse_json_object_raises_on_non_object_top_level() -> None:
+    with pytest.raises(ClaudeParseError):
+        claude_client._parse_json_object("[1, 2, 3]")
+
+
+def test_extract_text_from_response_concatenates_text_blocks() -> None:
+    msg = FakeMessage(content_blocks=[FakeTextBlock("foo "), FakeTextBlock("bar")])
+    assert claude_client._extract_text_from_response(msg) == "foo bar"
+
+
+def test_extract_text_from_response_returns_empty_for_no_text() -> None:
+    msg = FakeMessage(content_blocks=[])
+    assert claude_client._extract_text_from_response(msg) == ""
 
 
 # ============================================================================
@@ -268,8 +319,8 @@ def test_cache_breakpoints_placed_in_request(
     stub_field_map: StubFieldMap,
     small_pdf: Path,
 ) -> None:
-    fake_anthropic.messages.create.return_value = FakeMessage(
-        tool_uses=[make_tool_use(domain_tag="account.named_insured", value="X", confidence=0.95)]
+    fake_anthropic.messages.create.return_value = make_simple_message(
+        fields={"account.named_insured": make_field_entry(value="X", confidence=0.95)}
     )
 
     extract_from_pdf(
@@ -299,10 +350,9 @@ def test_cache_breakpoints_placed_in_request(
     # Final per-call text instruction is present and unmarked.
     assert user_msg["content"][2]["type"] == "text"
     assert "cache_control" not in user_msg["content"][2]
-    # Tool plumbing
-    assert len(kwargs["tools"]) == 1
-    assert kwargs["tools"][0]["name"] == "record_extracted_field"
-    assert kwargs["tool_choice"] == {"type": "any"}
+    # JSON mode: NO tools parameter passed.
+    assert "tools" not in kwargs
+    assert "tool_choice" not in kwargs
 
 
 def test_cache_breakpoints_clear_2048_token_minimum(
@@ -313,18 +363,16 @@ def test_cache_breakpoints_clear_2048_token_minimum(
 ) -> None:
     """Both breakpoints in a normal-size run should NOT trigger the
     'undersized breakpoint' warning (per Sonnet 4.6 2,048-token min /
-    PLAN-REVIEW Amendment #17). Use ~16K char prompt and ~16K char
-    field-map (>>4096 chars => >>1024 tokens => >>2048-token check still
-    passes since the field map prompt has many tags)."""
-    # Make sure both blocks comfortably exceed 2048 * 4 chars = 8192 chars.
+    PLAN-REVIEW Amendment #17)."""
     big_glossary = "GLOSSARY LINE\n" * 800  # ~11K chars
     big_system = "SYSTEM LINE\n" * 800  # ~10K chars
-    # Beef up domain tags so the field-map block clears the threshold.
     huge_field_map = StubFieldMap(
         domain_tags=[f"account.fake_field_{i:04d}" for i in range(2500)]
     )
-    fake_anthropic.messages.create.return_value = FakeMessage(
-        tool_uses=[make_tool_use(domain_tag="account.fake_field_0001", value="X", confidence=0.95)]
+    fake_anthropic.messages.create.return_value = make_simple_message(
+        fields={
+            "account.fake_field_0001": make_field_entry(value="X", confidence=0.95)
+        }
     )
 
     with caplog.at_level(logging.WARNING, logger="iga.claude"):
@@ -336,7 +384,9 @@ def test_cache_breakpoints_clear_2048_token_minimum(
             run_id="run-cache-min",
         )
 
-    undersized = [r for r in caplog.records if "cache_breakpoint_undersized" in r.getMessage()]
+    undersized = [
+        r for r in caplog.records if "cache_breakpoint_undersized" in r.getMessage()
+    ]
     assert undersized == []
 
 
@@ -347,12 +397,8 @@ def test_cache_breakpoints_clear_2048_token_minimum(
 
 def test_split_ranges_for_200_page_pdf() -> None:
     ranges = claude_client._compute_split_ranges(200)
-    # Expected: 80 + 80 + 40 with 1-page overlap (chunk N's last == chunk N+1's first)
-    # chunk 1: 1-80
-    # chunk 2: 80-159
-    # chunk 3: 159-200  (42 pages, but within MAX so OK)
+    # Expected: 80 + 80 + 40 with 1-page overlap
     assert ranges == [(1, 80), (80, 159), (159, 200)]
-    # Overlap is exactly 1 page between adjacent chunks.
     for prev, nxt in zip(ranges, ranges[1:]):
         assert prev[1] == nxt[0]
 
@@ -362,7 +408,6 @@ def test_split_ranges_for_exact_80_page_pdf() -> None:
 
 
 def test_split_ranges_for_81_page_pdf() -> None:
-    # Just over: 1-80, 80-81 (overlap of 1)
     assert claude_client._compute_split_ranges(81) == [(1, 80), (80, 81)]
 
 
@@ -371,16 +416,13 @@ def test_extract_splits_200_page_pdf_into_three_calls(
     stub_field_map: StubFieldMap,
     large_pdf: Path,
 ) -> None:
-    # Each chunk returns one record; merge should produce 3 unique records.
     responses = [
-        FakeMessage(
-            tool_uses=[
-                make_tool_use(
-                    domain_tag="account.named_insured",
-                    value=f"Chunk {i}",
-                    confidence=0.9,
+        make_simple_message(
+            fields={
+                "account.named_insured": make_field_entry(
+                    value=f"Chunk {i}", confidence=0.9
                 )
-            ]
+            }
         )
         for i in range(3)
     ]
@@ -394,13 +436,10 @@ def test_extract_splits_200_page_pdf_into_three_calls(
         run_id="run-split",
     )
 
-    # 3 API calls for split. (No escalation; confidence is 0.9.)
     assert fake_anthropic.messages.create.call_count == 3
-    # Merge dedupes by (domain_tag, group, index): all 3 have same key, so
-    # the highest-confidence wins. With equal confidence, last-write-wins.
+    # All three chunks emitted the same domain_tag → one merged record.
     assert len(result) == 1
     assert result[0].domain_tag == "account.named_insured"
-    # source_doc is rewritten to the original basename, never the chunk basename.
     assert result[0].source_doc == "big.pdf"
 
 
@@ -409,18 +448,13 @@ def test_split_calls_use_original_basename_in_extracted_records(
     stub_field_map: StubFieldMap,
     large_pdf: Path,
 ) -> None:
-    # Each chunk returns a *different* record; the merged result should
-    # have all three with source_doc=big.pdf.
     fake_anthropic.messages.create.side_effect = [
-        FakeMessage(
-            tool_uses=[
-                make_tool_use(
-                    domain_tag=f"account.field_{i}",
-                    value=f"v{i}",
-                    confidence=0.9,
-                    source_doc="claude-says-something-else.pdf",
+        make_simple_message(
+            fields={
+                f"account.field_{i}": make_field_entry(
+                    value=f"v{i}", confidence=0.9
                 )
-            ]
+            }
         )
         for i in range(3)
     ]
@@ -448,8 +482,8 @@ def test_split_writes_chunks_to_debug_split_dir(
     large_pdf: Path,
     tmp_path: Path,
 ) -> None:
-    fake_anthropic.messages.create.return_value = FakeMessage(
-        tool_uses=[make_tool_use(domain_tag="account.named_insured", value="X", confidence=0.9)]
+    fake_anthropic.messages.create.return_value = make_simple_message(
+        fields={"account.named_insured": make_field_entry(value="X", confidence=0.9)}
     )
     debug_dir = tmp_path / "client" / "debug" / "claude" / "run-x"
     extract_from_pdf(
@@ -467,6 +501,276 @@ def test_split_writes_chunks_to_debug_split_dir(
 
 
 # ============================================================================
+# JSON mode → ExtractedField conversion
+# ============================================================================
+
+
+def test_basic_fields_converted_to_extracted_records(
+    fake_anthropic: MagicMock,
+    stub_field_map: StubFieldMap,
+    small_pdf: Path,
+) -> None:
+    fake_anthropic.messages.create.return_value = make_simple_message(
+        fields={
+            "account.named_insured": make_field_entry(
+                value="Acme Inc",
+                confidence=0.95,
+                source_page=1,
+                source_quote="Named Insured: Acme Inc",
+            ),
+            "policy.gl.aggregate_limit": make_field_entry(
+                value="2,000,000",
+                confidence=0.94,
+                source_page=2,
+                source_quote="General Aggregate Limit  $2,000,000",
+            ),
+        }
+    )
+
+    result = extract_from_pdf(
+        small_pdf,
+        stub_field_map,
+        glossary="g",
+        system_prompt="s",
+        run_id="run-fields",
+    )
+
+    by_tag = {r.domain_tag: r for r in result}
+    assert set(by_tag) == {"account.named_insured", "policy.gl.aggregate_limit"}
+    ni = by_tag["account.named_insured"]
+    assert ni.value == "Acme Inc"
+    assert ni.confidence == 0.95
+    assert ni.source_page == 1
+    assert ni.source_quote == "Named Insured: Acme Inc"
+    assert ni.repeatable_group is None
+    assert ni.repeatable_index is None
+    assert ni.source_doc == "small.pdf"
+
+
+def test_repeatable_items_emit_one_record_per_subfield(
+    fake_anthropic: MagicMock,
+    stub_field_map: StubFieldMap,
+    small_pdf: Path,
+) -> None:
+    fake_anthropic.messages.create.return_value = make_simple_message(
+        repeatables={
+            "vehicle": [
+                {
+                    "vehicle.year": "2022",
+                    "vehicle.make": "Freightliner",
+                    "vehicle.vin": "1FUJGLDR3NLNN1234",
+                    "_confidence": 0.93,
+                    "_source_page": 4,
+                    "_source_quote": "1 2022 FREIGHTLINER VIN 1FUJGLDR3NLNN1234",
+                    "_needs_review": False,
+                },
+                {
+                    "vehicle.year": "2023",
+                    "vehicle.make": "Volvo",
+                    "vehicle.vin": "4V4NC9EH3PN999999",
+                    "_confidence": 0.91,
+                    "_source_page": 4,
+                    "_source_quote": "2 2023 VOLVO VIN 4V4NC9EH3PN999999",
+                    "_needs_review": False,
+                },
+            ]
+        }
+    )
+
+    result = extract_from_pdf(
+        small_pdf,
+        stub_field_map,
+        glossary="g",
+        system_prompt="s",
+        run_id="run-rep",
+    )
+
+    # 2 vehicles × 3 sub-fields = 6 records.
+    assert len(result) == 6
+    by_index_tag = {(r.repeatable_index, r.domain_tag): r for r in result}
+    v0_year = by_index_tag[(0, "vehicle.year")]
+    assert v0_year.value == "2022"
+    assert v0_year.repeatable_group == "vehicle"
+    assert v0_year.repeatable_index == 0
+    assert v0_year.source_page == 4
+    assert v0_year.confidence == 0.93
+    v1_make = by_index_tag[(1, "vehicle.make")]
+    assert v1_make.value == "Volvo"
+    assert v1_make.repeatable_index == 1
+
+
+def test_fields_and_repeatables_combine_in_one_response(
+    fake_anthropic: MagicMock,
+    stub_field_map: StubFieldMap,
+    small_pdf: Path,
+) -> None:
+    fake_anthropic.messages.create.return_value = make_simple_message(
+        fields={
+            "account.named_insured": make_field_entry(value="X", confidence=0.95),
+        },
+        repeatables={
+            "loss_payee": [
+                {
+                    "loss_payee.name": "First National",
+                    "_confidence": 0.95,
+                    "_source_page": 4,
+                    "_source_quote": "Loss Payee: First National",
+                    "_needs_review": False,
+                }
+            ]
+        },
+    )
+
+    result = extract_from_pdf(
+        small_pdf,
+        stub_field_map,
+        glossary="g",
+        system_prompt="s",
+        run_id="run-mix",
+    )
+
+    by_tag = {(r.domain_tag, r.repeatable_index): r for r in result}
+    assert ("account.named_insured", None) in by_tag
+    assert ("loss_payee.name", 0) in by_tag
+
+
+def test_json_response_wrapped_in_markdown_fences_parses_correctly(
+    fake_anthropic: MagicMock,
+    stub_field_map: StubFieldMap,
+    small_pdf: Path,
+) -> None:
+    raw_payload = build_response_text(
+        fields={
+            "account.named_insured": make_field_entry(value="Acme", confidence=0.92)
+        }
+    )
+    fenced = f"```json\n{raw_payload}\n```"
+    fake_anthropic.messages.create.return_value = FakeMessage(text=fenced)
+
+    result = extract_from_pdf(
+        small_pdf,
+        stub_field_map,
+        glossary="g",
+        system_prompt="s",
+        run_id="run-fence",
+    )
+    assert len(result) == 1
+    assert result[0].value == "Acme"
+
+
+def test_malformed_json_raises_parse_error(
+    fake_anthropic: MagicMock,
+    stub_field_map: StubFieldMap,
+    small_pdf: Path,
+) -> None:
+    fake_anthropic.messages.create.return_value = FakeMessage(
+        text="Sure, here's the data: {fields: stuff}"
+    )
+    with pytest.raises(ClaudeParseError):
+        extract_from_pdf(
+            small_pdf,
+            stub_field_map,
+            glossary="g",
+            system_prompt="s",
+            run_id="run-bad-json",
+        )
+
+
+def test_empty_response_text_raises_parse_error(
+    fake_anthropic: MagicMock,
+    stub_field_map: StubFieldMap,
+    small_pdf: Path,
+) -> None:
+    fake_anthropic.messages.create.return_value = FakeMessage(content_blocks=[])
+    with pytest.raises(ClaudeParseError):
+        extract_from_pdf(
+            small_pdf,
+            stub_field_map,
+            glossary="g",
+            system_prompt="s",
+            run_id="run-empty",
+        )
+
+
+def test_invalid_field_payload_logs_and_skips(
+    fake_anthropic: MagicMock,
+    stub_field_map: StubFieldMap,
+    small_pdf: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A field entry missing required keys is warned-and-skipped; valid
+    entries in the same response still emit records."""
+    fake_anthropic.messages.create.return_value = make_simple_message(
+        fields={
+            "account.bad": {"value": "X"},  # missing confidence + source_page
+            "account.named_insured": make_field_entry(value="OK", confidence=0.9),
+        }
+    )
+
+    with caplog.at_level(logging.WARNING, logger="iga.claude"):
+        result = extract_from_pdf(
+            small_pdf,
+            stub_field_map,
+            glossary="g",
+            system_prompt="s",
+            run_id="run-bad-field",
+        )
+
+    assert {r.domain_tag for r in result} == {"account.named_insured"}
+    bad_entry = [
+        r for r in caplog.records if "json_field_invalid" in r.getMessage()
+    ]
+    assert bad_entry  # at least one warning emitted
+
+
+def test_repeatable_with_per_subfield_metadata_honors_overrides(
+    fake_anthropic: MagicMock,
+    stub_field_map: StubFieldMap,
+    small_pdf: Path,
+) -> None:
+    """A sub-field that's itself a {value, confidence, ...} dict overrides
+    item-level metadata."""
+    fake_anthropic.messages.create.return_value = make_simple_message(
+        repeatables={
+            "vehicle": [
+                {
+                    "vehicle.year": {
+                        "value": "2022",
+                        "confidence": 0.99,
+                        "source_page": 5,
+                        "source_quote": "row says 2022",
+                        "needs_review": False,
+                    },
+                    "vehicle.vin": "1XYZ",
+                    "_confidence": 0.7,
+                    "_source_page": 4,
+                    "_source_quote": "fallback quote",
+                    "_needs_review": True,
+                }
+            ]
+        }
+    )
+
+    result = extract_from_pdf(
+        small_pdf,
+        stub_field_map,
+        glossary="g",
+        system_prompt="s",
+        run_id="run-rep-override",
+    )
+
+    by_tag = {r.domain_tag: r for r in result}
+    year = by_tag["vehicle.year"]
+    assert year.confidence == 0.99
+    assert year.source_page == 5
+    assert year.needs_review is False
+    vin = by_tag["vehicle.vin"]
+    assert vin.confidence == 0.7
+    assert vin.source_page == 4
+    assert vin.needs_review is True
+
+
+# ============================================================================
 # Auto-escalation tests
 # ============================================================================
 
@@ -476,33 +780,37 @@ def test_low_confidence_triggers_opus_reextract(
     stub_field_map: StubFieldMap,
     small_pdf: Path,
 ) -> None:
-    sonnet_response = FakeMessage(
-        tool_uses=[
-            make_tool_use(
-                domain_tag="account.named_insured",
-                value="Bobby Luttrell",
-                confidence=0.97,
+    sonnet_response = make_simple_message(
+        fields={
+            "account.named_insured": make_field_entry(
+                value="Bobby Luttrell", confidence=0.97
             ),
-            make_tool_use(
-                domain_tag="vehicle.vin",
-                value="XYZ123",
-                confidence=0.5,  # below threshold → escalate
-                repeatable_group="vehicle",
-                repeatable_index=0,
-            ),
-        ]
+        },
+        repeatables={
+            "vehicle": [
+                {
+                    "vehicle.vin": "XYZ123",
+                    "_confidence": 0.5,  # below threshold → escalate
+                    "_source_page": 1,
+                    "_source_quote": "...",
+                    "_needs_review": False,
+                }
+            ]
+        },
     )
-    opus_response = FakeMessage(
+    opus_response = make_simple_message(
         model=DEFAULT_OPUS_MODEL,
-        tool_uses=[
-            make_tool_use(
-                domain_tag="vehicle.vin",
-                value="1FA6P0HD3K5123456",
-                confidence=0.95,
-                repeatable_group="vehicle",
-                repeatable_index=0,
-            ),
-        ],
+        repeatables={
+            "vehicle": [
+                {
+                    "vehicle.vin": "1FA6P0HD3K5123456",
+                    "_confidence": 0.95,
+                    "_source_page": 1,
+                    "_source_quote": "VIN 1FA6P0HD3K5123456",
+                    "_needs_review": False,
+                }
+            ]
+        },
     )
     fake_anthropic.messages.create.side_effect = [sonnet_response, opus_response]
 
@@ -514,7 +822,6 @@ def test_low_confidence_triggers_opus_reextract(
         run_id="run-esc",
     )
 
-    # 2 calls: 1 Sonnet pass + 1 Opus re-prompt.
     assert fake_anthropic.messages.create.call_count == 2
     sonnet_call = fake_anthropic.messages.create.call_args_list[0]
     opus_call = fake_anthropic.messages.create.call_args_list[1]
@@ -522,9 +829,7 @@ def test_low_confidence_triggers_opus_reextract(
     assert opus_call.kwargs["model"] == DEFAULT_OPUS_MODEL
 
     by_tag = {(r.domain_tag, r.repeatable_index): r for r in result}
-    # High-confidence Sonnet record kept as-is.
     assert by_tag[("account.named_insured", None)].model_used == DEFAULT_SONNET_MODEL
-    # Escalated record replaced by Opus version, tagged opus.
     vin = by_tag[("vehicle.vin", 0)]
     assert vin.value == "1FA6P0HD3K5123456"
     assert vin.confidence == 0.95
@@ -536,25 +841,22 @@ def test_needs_review_triggers_escalation(
     stub_field_map: StubFieldMap,
     small_pdf: Path,
 ) -> None:
-    sonnet_response = FakeMessage(
-        tool_uses=[
-            make_tool_use(
-                domain_tag="account.named_insured",
+    sonnet_response = make_simple_message(
+        fields={
+            "account.named_insured": make_field_entry(
                 value="Maybe Inc",
                 confidence=0.92,  # high confidence
                 needs_review=True,  # but flagged for review → escalate
-            ),
-        ]
-    )
-    opus_response = FakeMessage(
-        model=DEFAULT_OPUS_MODEL,
-        tool_uses=[
-            make_tool_use(
-                domain_tag="account.named_insured",
-                value="Definitely Inc",
-                confidence=0.99,
             )
-        ],
+        }
+    )
+    opus_response = make_simple_message(
+        model=DEFAULT_OPUS_MODEL,
+        fields={
+            "account.named_insured": make_field_entry(
+                value="Definitely Inc", confidence=0.99
+            )
+        },
     )
     fake_anthropic.messages.create.side_effect = [sonnet_response, opus_response]
 
@@ -576,25 +878,20 @@ def test_required_missing_triggers_escalation(
     stub_field_map: StubFieldMap,
     small_pdf: Path,
 ) -> None:
-    # submission.effective_date is required; Sonnet returns null with high confidence.
-    sonnet_response = FakeMessage(
-        tool_uses=[
-            make_tool_use(
-                domain_tag="submission.effective_date",
-                value=None,
-                confidence=0.95,
+    sonnet_response = make_simple_message(
+        fields={
+            "submission.effective_date": make_field_entry(
+                value=None, confidence=0.95
             )
-        ]
+        }
     )
-    opus_response = FakeMessage(
+    opus_response = make_simple_message(
         model=DEFAULT_OPUS_MODEL,
-        tool_uses=[
-            make_tool_use(
-                domain_tag="submission.effective_date",
-                value="2026-05-01",
-                confidence=0.96,
+        fields={
+            "submission.effective_date": make_field_entry(
+                value="2026-05-01", confidence=0.96
             )
-        ],
+        },
     )
     fake_anthropic.messages.create.side_effect = [sonnet_response, opus_response]
 
@@ -616,11 +913,11 @@ def test_no_escalation_when_all_records_confident(
     stub_field_map: StubFieldMap,
     small_pdf: Path,
 ) -> None:
-    fake_anthropic.messages.create.return_value = FakeMessage(
-        tool_uses=[
-            make_tool_use(domain_tag="account.named_insured", value="X", confidence=0.95),
-            make_tool_use(domain_tag="vehicle.vin", value="VIN", confidence=0.92),
-        ]
+    fake_anthropic.messages.create.return_value = make_simple_message(
+        fields={
+            "account.named_insured": make_field_entry(value="X", confidence=0.95),
+            "vehicle.vin": make_field_entry(value="VIN", confidence=0.92),
+        }
     )
 
     result = extract_from_pdf(
@@ -631,7 +928,6 @@ def test_no_escalation_when_all_records_confident(
         run_id="run-no-esc",
     )
 
-    # Single Sonnet call — no escalation.
     assert fake_anthropic.messages.create.call_count == 1
     for rec in result:
         assert rec.model_used == DEFAULT_SONNET_MODEL
@@ -647,15 +943,13 @@ def test_force_opus_skips_sonnet_first_pass(
     stub_field_map: StubFieldMap,
     small_pdf: Path,
 ) -> None:
-    fake_anthropic.messages.create.return_value = FakeMessage(
+    fake_anthropic.messages.create.return_value = make_simple_message(
         model=DEFAULT_OPUS_MODEL,
-        tool_uses=[
-            make_tool_use(
-                domain_tag="account.named_insured",
-                value="X",
-                confidence=0.5,  # would normally trigger escalation
+        fields={
+            "account.named_insured": make_field_entry(
+                value="X", confidence=0.5  # would normally trigger escalation
             )
-        ],
+        },
     )
 
     result = extract_from_pdf(
@@ -667,7 +961,6 @@ def test_force_opus_skips_sonnet_first_pass(
         force_opus=True,
     )
 
-    # Exactly one call, with the Opus model — no escalation second call.
     assert fake_anthropic.messages.create.call_count == 1
     call_kwargs = fake_anthropic.messages.create.call_args.kwargs
     assert call_kwargs["model"] == DEFAULT_OPUS_MODEL
@@ -682,46 +975,37 @@ def test_force_opus_skips_sonnet_first_pass(
 def test_cache_miss_warning_logged_when_both_cache_tokens_zero(
     fake_anthropic: MagicMock,
     stub_field_map: StubFieldMap,
-    small_pdf: Path,
     tmp_path: Path,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """When the second call shows zero cache_creation AND zero cache_read,
     the module logs a WARNING tagged claude.cache_miss."""
-    # Two chunks (force a split via large_pdf) → first call sets up the
-    # cache, second call should hit it. Returning all zeros simulates a
-    # genuine cache miss on the second call (e.g., a Field Map churn
-    # between calls).
     big_pdf = tmp_path / "big.pdf"
     big_pdf.write_bytes(make_pdf_bytes(200))
 
     fake_anthropic.messages.create.side_effect = [
-        FakeMessage(
-            tool_uses=[
-                make_tool_use(domain_tag="account.named_insured", value="X", confidence=0.9)
-            ],
+        make_simple_message(
+            fields={
+                "account.named_insured": make_field_entry(value="X", confidence=0.9)
+            },
             usage=FakeUsage(
                 cache_creation_input_tokens=50_000,
                 cache_read_input_tokens=0,
             ),
         ),
-        FakeMessage(
-            tool_uses=[
-                make_tool_use(
-                    domain_tag="account.named_insured", value="Y", confidence=0.9
-                )
-            ],
+        make_simple_message(
+            fields={
+                "account.named_insured": make_field_entry(value="Y", confidence=0.9)
+            },
             usage=FakeUsage(
-                cache_creation_input_tokens=0,  # ← both zero on a cacheable call
+                cache_creation_input_tokens=0,
                 cache_read_input_tokens=0,
             ),
         ),
-        FakeMessage(
-            tool_uses=[
-                make_tool_use(
-                    domain_tag="account.named_insured", value="Z", confidence=0.9
-                )
-            ],
+        make_simple_message(
+            fields={
+                "account.named_insured": make_field_entry(value="Z", confidence=0.9)
+            },
             usage=FakeUsage(
                 cache_creation_input_tokens=0,
                 cache_read_input_tokens=50_000,
@@ -739,7 +1023,9 @@ def test_cache_miss_warning_logged_when_both_cache_tokens_zero(
         )
 
     cache_miss_warnings = [
-        r for r in caplog.records if r.levelno == logging.WARNING and "cache_miss" in r.getMessage()
+        r
+        for r in caplog.records
+        if r.levelno == logging.WARNING and "cache_miss" in r.getMessage()
     ]
     assert len(cache_miss_warnings) == 1
 
@@ -750,12 +1036,10 @@ def test_no_cache_miss_warning_on_first_call(
     small_pdf: Path,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """The first call in a session can't possibly hit the cache; we should
-    not warn."""
-    fake_anthropic.messages.create.return_value = FakeMessage(
-        tool_uses=[
-            make_tool_use(domain_tag="account.named_insured", value="X", confidence=0.95)
-        ],
+    fake_anthropic.messages.create.return_value = make_simple_message(
+        fields={
+            "account.named_insured": make_field_entry(value="X", confidence=0.95)
+        },
         usage=FakeUsage(
             cache_creation_input_tokens=0,
             cache_read_input_tokens=0,
@@ -781,8 +1065,10 @@ def test_cache_usage_logged_at_info(
     small_pdf: Path,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    fake_anthropic.messages.create.return_value = FakeMessage(
-        tool_uses=[make_tool_use(domain_tag="account.named_insured", value="X", confidence=0.95)],
+    fake_anthropic.messages.create.return_value = make_simple_message(
+        fields={
+            "account.named_insured": make_field_entry(value="X", confidence=0.95)
+        },
         usage=FakeUsage(
             input_tokens=12_345,
             output_tokens=678,
@@ -811,7 +1097,6 @@ def test_cache_usage_logged_at_info(
 
 
 def _make_rate_limit_error() -> anthropic.RateLimitError:
-    """Construct a RateLimitError without going over the network."""
     response = MagicMock()
     response.status_code = 429
     response.headers = {}
@@ -850,10 +1135,10 @@ def test_retry_on_rate_limit_then_succeeds(
     fake_anthropic.messages.create.side_effect = [
         _make_rate_limit_error(),
         _make_rate_limit_error(),
-        FakeMessage(
-            tool_uses=[
-                make_tool_use(domain_tag="account.named_insured", value="X", confidence=0.9)
-            ]
+        make_simple_message(
+            fields={
+                "account.named_insured": make_field_entry(value="X", confidence=0.9)
+            }
         ),
     ]
 
@@ -880,10 +1165,10 @@ def test_retry_on_5xx_then_succeeds(
     )
     fake_anthropic.messages.create.side_effect = [
         _make_internal_error(),
-        FakeMessage(
-            tool_uses=[
-                make_tool_use(domain_tag="account.named_insured", value="X", confidence=0.9)
-            ]
+        make_simple_message(
+            fields={
+                "account.named_insured": make_field_entry(value="X", confidence=0.9)
+            }
         ),
     ]
 
@@ -932,7 +1217,6 @@ def test_rate_limit_exhausts_retries_then_raises(
             system_prompt="s",
             run_id="run-retry-out",
         )
-    # 1 initial + 4 retries = 5 attempts.
     assert fake_anthropic.messages.create.call_count == 5
 
 
@@ -947,8 +1231,10 @@ def test_debug_artifacts_written_when_debug_dir_set(
     small_pdf: Path,
     tmp_path: Path,
 ) -> None:
-    fake_anthropic.messages.create.return_value = FakeMessage(
-        tool_uses=[make_tool_use(domain_tag="account.named_insured", value="X", confidence=0.95)]
+    fake_anthropic.messages.create.return_value = make_simple_message(
+        fields={
+            "account.named_insured": make_field_entry(value="X", confidence=0.95)
+        }
     )
     debug_dir = tmp_path / "client" / "debug" / "claude" / "run-debug"
 
@@ -968,7 +1254,6 @@ def test_debug_artifacts_written_when_debug_dir_set(
     assert len(resp_files) == 1
 
     req_payload = json.loads(req_files[0].read_text(encoding="utf-8"))
-    # PDF base64 should be elided to a hash placeholder.
     document_blocks = [
         b
         for msg in req_payload.get("messages", [])
@@ -979,7 +1264,6 @@ def test_debug_artifacts_written_when_debug_dir_set(
     assert document_blocks[0]["source"]["data"].startswith("<base64 elided sha256=")
 
     resp_payload = json.loads(resp_files[0].read_text(encoding="utf-8"))
-    # Cache usage in the saved response payload.
     assert "usage" in resp_payload
     assert "cache_creation_input_tokens" in resp_payload["usage"]
 
@@ -990,8 +1274,10 @@ def test_no_debug_artifacts_when_debug_dir_none(
     small_pdf: Path,
     tmp_path: Path,
 ) -> None:
-    fake_anthropic.messages.create.return_value = FakeMessage(
-        tool_uses=[make_tool_use(domain_tag="account.named_insured", value="X", confidence=0.95)]
+    fake_anthropic.messages.create.return_value = make_simple_message(
+        fields={
+            "account.named_insured": make_field_entry(value="X", confidence=0.95)
+        }
     )
     extract_from_pdf(
         small_pdf,
@@ -1001,7 +1287,6 @@ def test_no_debug_artifacts_when_debug_dir_none(
         run_id="run-no-debug",
         debug_dir=None,
     )
-    # Nothing written under tmp_path.
     assert list(tmp_path.glob("**/*.req.json")) == []
     assert list(tmp_path.glob("**/*.resp.json")) == []
 
@@ -1016,15 +1301,13 @@ def test_reextract_low_confidence_fields_runs_opus(
     stub_field_map: StubFieldMap,
     small_pdf: Path,
 ) -> None:
-    fake_anthropic.messages.create.return_value = FakeMessage(
+    fake_anthropic.messages.create.return_value = make_simple_message(
         model=DEFAULT_OPUS_MODEL,
-        tool_uses=[
-            make_tool_use(
-                domain_tag="vehicle.vin",
-                value="1FA6P0HD3K5123456",
-                confidence=0.95,
+        fields={
+            "vehicle.vin": make_field_entry(
+                value="1FA6P0HD3K5123456", confidence=0.95
             )
-        ],
+        },
     )
 
     targets = [
@@ -1076,19 +1359,12 @@ def test_reextract_filters_to_requested_tags(
     stub_field_map: StubFieldMap,
     small_pdf: Path,
 ) -> None:
-    # Opus returns extra fields the caller didn't ask about; we drop them.
-    fake_anthropic.messages.create.return_value = FakeMessage(
+    fake_anthropic.messages.create.return_value = make_simple_message(
         model=DEFAULT_OPUS_MODEL,
-        tool_uses=[
-            make_tool_use(
-                domain_tag="vehicle.vin", value="VINGOOD", confidence=0.95
-            ),
-            make_tool_use(
-                domain_tag="account.named_insured",
-                value="X",
-                confidence=0.9,
-            ),
-        ],
+        fields={
+            "vehicle.vin": make_field_entry(value="VINGOOD", confidence=0.95),
+            "account.named_insured": make_field_entry(value="X", confidence=0.9),
+        },
     )
     targets = [
         ExtractedField(
@@ -1140,39 +1416,6 @@ def test_extract_from_pdf_raises_auth_error_without_key(
 
 
 # ============================================================================
-# Tool input parsing
-# ============================================================================
-
-
-def test_invalid_tool_input_is_skipped_not_raised(
-    fake_anthropic: MagicMock,
-    stub_field_map: StubFieldMap,
-    small_pdf: Path,
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """Malformed tool_use blocks are warned-and-skipped, not raised."""
-    fake_anthropic.messages.create.return_value = FakeMessage(
-        tool_uses=[
-            FakeToolUseBlock("record_extracted_field", {"missing": "fields"}),
-            make_tool_use(domain_tag="account.named_insured", value="OK", confidence=0.9),
-        ]
-    )
-
-    with caplog.at_level(logging.WARNING, logger="iga.claude"):
-        result = extract_from_pdf(
-            small_pdf,
-            stub_field_map,
-            glossary="g",
-            system_prompt="s",
-            run_id="run-bad-input",
-        )
-
-    assert {r.domain_tag for r in result} == {"account.named_insured"}
-    bad_input = [r for r in caplog.records if "tool_input_invalid" in r.getMessage()]
-    assert len(bad_input) == 1
-
-
-# ============================================================================
 # Field Map prompt block (Bug 3 regression)
 # ============================================================================
 
@@ -1180,27 +1423,20 @@ def test_invalid_tool_input_is_skipped_not_raised(
 def test_serialize_field_map_against_real_field_map_clears_2048_tokens() -> None:
     """Regression for Bug 3: the on-disk Field Map JSON must produce a
     prompt block that comfortably exceeds the 2,048-token Sonnet 4.6
-    cache-prefix minimum (RESEARCH.md Finding 5). Before the fix the
-    block was 28 tokens (just the empty enum placeholder) so the cache
-    breakpoint never activated and Claude got no field universe at all.
-    """
+    cache-prefix minimum (RESEARCH.md Finding 5)."""
     from iga_marketing_master_2 import field_map as field_map_mod
 
     fm = field_map_mod.load()
     text = claude_client._serialize_field_map_for_prompt(fm)
-    # Use the same chars/token heuristic claude_client uses internally.
     approx_tokens = len(text) // 4
     assert approx_tokens > 2048, (
         f"Field Map prompt block only {approx_tokens} tokens — Sonnet's "
         f"2048-token cache threshold won't activate, and Claude won't see "
         f"the EPIC field universe."
     )
-    # Sanity-check that the block actually contains screen/field content
-    # (not just a screen of placeholders).
     assert "## Screen:" in text
     assert "label=" in text
     assert "name=" in text
-    # Grammar reminder is present so Claude knows how to format new tags.
     assert "domain_tag" in text and "lowercase" in text
 
 
@@ -1212,14 +1448,11 @@ def test_call_outbound_and_call_returned_logged(
 ) -> None:
     """Regression for Bug 6: every Anthropic round-trip must emit
     ``claude.call_outbound`` BEFORE ``messages.create`` and
-    ``claude.call_returned`` AFTER. Together they let a future diagnostic
-    pass verify the call was a real API round-trip (vs a synthetic
-    response from the SDK or a mock).
-    """
-    fake_anthropic.messages.create.return_value = FakeMessage(
-        tool_uses=[
-            make_tool_use(domain_tag="account.named_insured", value="X", confidence=0.95)
-        ],
+    ``claude.call_returned`` AFTER."""
+    fake_anthropic.messages.create.return_value = make_simple_message(
+        fields={
+            "account.named_insured": make_field_entry(value="X", confidence=0.95)
+        }
     )
     with caplog.at_level(logging.INFO, logger="iga.claude"):
         extract_from_pdf(
@@ -1234,52 +1467,20 @@ def test_call_outbound_and_call_returned_logged(
     returned = [m for m in info_lines if "claude.call_returned" in m]
     assert len(outbound) == 1, info_lines
     assert len(returned) == 1, info_lines
-    # Outbound log carries model + last-4 of the API key.
     assert "model=" in outbound[0]
     assert "api_key_fingerprint=" in outbound[0]
-    # Returned log carries the response_id that Anthropic stamps on every
-    # real Message — if it's missing on a real call we know something
-    # synthetic is happening.
     assert "response_id=" in returned[0]
     assert "stop_reason=" in returned[0]
 
 
-def test_serialize_field_map_handles_empty_enum_with_grammar_reminder(
-    stub_field_map: StubFieldMap,
-) -> None:
+def test_serialize_field_map_handles_empty_enum_with_grammar_reminder() -> None:
     """When the enum is empty (bootstrap state), the block should still
     include the grammar reminder so Claude knows the target format."""
-    empty_fm = StubFieldMap()  # no domain_tags at all
+    empty_fm = StubFieldMap()
     text = claude_client._serialize_field_map_for_prompt(empty_fm)
     assert "lowercase" in text
     assert "domain_tag" in text
-    # The empty placeholder is still emitted.
     assert "free-text domain_tag" in text
-
-
-def test_unknown_tool_name_warned_and_skipped(
-    fake_anthropic: MagicMock,
-    stub_field_map: StubFieldMap,
-    small_pdf: Path,
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    fake_anthropic.messages.create.return_value = FakeMessage(
-        tool_uses=[
-            FakeToolUseBlock("some_other_tool", {}),
-            make_tool_use(domain_tag="account.named_insured", value="X", confidence=0.9),
-        ]
-    )
-    with caplog.at_level(logging.WARNING, logger="iga.claude"):
-        result = extract_from_pdf(
-            small_pdf,
-            stub_field_map,
-            glossary="g",
-            system_prompt="s",
-            run_id="run-unknown-tool",
-        )
-    assert len(result) == 1
-    unexpected = [r for r in caplog.records if "unexpected_tool" in r.getMessage()]
-    assert len(unexpected) == 1
 
 
 # ============================================================================
@@ -1293,18 +1494,11 @@ def test_extract_from_pdf_attaches_cache_usage_to_returned_list(
     small_pdf: Path,
 ) -> None:
     """Bug 7 fix: claude_client must attach a cache_usage block to its
-    returned list so extract.py can aggregate cache + token totals.
-
-    Before the fix, the per-call numbers were only logged at INFO and
-    never propagated; the run-end aggregate showed all zeros even on
-    a successful run with real billing.
-    """
-    fake_anthropic.messages.create.return_value = FakeMessage(
-        tool_uses=[
-            make_tool_use(
-                domain_tag="account.named_insured", value="X", confidence=0.95
-            )
-        ],
+    returned list so extract.py can aggregate cache + token totals."""
+    fake_anthropic.messages.create.return_value = make_simple_message(
+        fields={
+            "account.named_insured": make_field_entry(value="X", confidence=0.95)
+        },
         usage=FakeUsage(
             input_tokens=23_217,
             output_tokens=175,
@@ -1323,7 +1517,6 @@ def test_extract_from_pdf_attaches_cache_usage_to_returned_list(
 
     usage = getattr(result, "cache_usage", None)
     assert usage is not None, "extract_from_pdf must attach cache_usage"
-    # Match the exact numbers from the operator's diagnostic run.
     assert usage.input_tokens == 23_217
     assert usage.output_tokens == 175
     assert usage.cache_creation_input_tokens == 42_772
@@ -1339,12 +1532,12 @@ def test_extract_from_pdf_sums_usage_across_split_chunks(
     """For a multi-chunk PDF, cache_usage on the returned list must equal
     the per-chunk totals summed across all chunks. Bug 7 regression."""
     fake_anthropic.messages.create.side_effect = [
-        FakeMessage(
-            tool_uses=[
-                make_tool_use(
-                    domain_tag="account.named_insured", value=f"v{i}", confidence=0.9
+        make_simple_message(
+            fields={
+                "account.named_insured": make_field_entry(
+                    value=f"v{i}", confidence=0.9
                 )
-            ],
+            },
             usage=FakeUsage(
                 input_tokens=1_000 * (i + 1),
                 output_tokens=100 * (i + 1),
@@ -1366,13 +1559,9 @@ def test_extract_from_pdf_sums_usage_across_split_chunks(
     usage = getattr(result, "cache_usage", None)
     assert usage is not None
     assert usage.api_calls == 3
-    # 1000 + 2000 + 3000
     assert usage.input_tokens == 6_000
-    # 100 + 200 + 300
     assert usage.output_tokens == 600
-    # 10000 + 20000 + 30000
     assert usage.cache_creation_input_tokens == 60_000
-    # 5000 + 10000 + 15000
     assert usage.cache_read_input_tokens == 30_000
 
 
@@ -1383,13 +1572,9 @@ def test_reextract_low_confidence_fields_attaches_cache_usage(
 ) -> None:
     """Re-extract path must propagate usage too — Opus calls cost more
     so the operator-visible aggregate especially matters here."""
-    fake_anthropic.messages.create.return_value = FakeMessage(
+    fake_anthropic.messages.create.return_value = make_simple_message(
         model=DEFAULT_OPUS_MODEL,
-        tool_uses=[
-            make_tool_use(
-                domain_tag="vehicle.vin", value="VIN", confidence=0.95
-            )
-        ],
+        fields={"vehicle.vin": make_field_entry(value="VIN", confidence=0.95)},
         usage=FakeUsage(
             input_tokens=8_000,
             output_tokens=200,
@@ -1433,16 +1618,18 @@ def test_extract_from_pdf_includes_opus_escalation_in_usage_total(
     """When auto-escalation kicks in (Sonnet → Opus), the returned
     cache_usage must include BOTH the Sonnet first-pass and the Opus
     second-pass numbers."""
-    sonnet_response = FakeMessage(
-        tool_uses=[
-            make_tool_use(
-                domain_tag="vehicle.vin",
-                value="XYZ",
-                confidence=0.5,  # below threshold → escalate
-                repeatable_group="vehicle",
-                repeatable_index=0,
-            ),
-        ],
+    sonnet_response = make_simple_message(
+        repeatables={
+            "vehicle": [
+                {
+                    "vehicle.vin": "XYZ",
+                    "_confidence": 0.5,
+                    "_source_page": 1,
+                    "_source_quote": "...",
+                    "_needs_review": False,
+                }
+            ]
+        },
         usage=FakeUsage(
             input_tokens=10_000,
             output_tokens=300,
@@ -1450,17 +1637,19 @@ def test_extract_from_pdf_includes_opus_escalation_in_usage_total(
             cache_read_input_tokens=0,
         ),
     )
-    opus_response = FakeMessage(
+    opus_response = make_simple_message(
         model=DEFAULT_OPUS_MODEL,
-        tool_uses=[
-            make_tool_use(
-                domain_tag="vehicle.vin",
-                value="GOOD_VIN",
-                confidence=0.95,
-                repeatable_group="vehicle",
-                repeatable_index=0,
-            ),
-        ],
+        repeatables={
+            "vehicle": [
+                {
+                    "vehicle.vin": "GOOD_VIN",
+                    "_confidence": 0.95,
+                    "_source_page": 1,
+                    "_source_quote": "...",
+                    "_needs_review": False,
+                }
+            ]
+        },
         usage=FakeUsage(
             input_tokens=3_000,
             output_tokens=120,
@@ -1488,350 +1677,61 @@ def test_extract_from_pdf_includes_opus_escalation_in_usage_total(
 
 
 # ============================================================================
-# Bug 8 / fix-pass-3 — tool description matches iterative tool-use loop
+# JSON-mode contract: NO tools parameter is ever sent
 # ============================================================================
 
 
-def test_tool_description_describes_iterative_tool_use_loop(
-    stub_field_map: StubFieldMap,
-) -> None:
-    """fix-pass-3: the tool description must tell Claude that this is a
-    multi-turn tool-use loop where each call records ONE field and the
-    system replies before Claude continues. The previous "parallel /
-    many calls in one response" wording was wrong because Sonnet 4.6
-    gates itself to one tool_use per response anyway."""
-    schema = build_record_field_tool_schema(stub_field_map)
-    desc = schema["description"]
-    desc_lower = desc.lower()
-    # SEMANTIC requirement: iterative loop where each call records one field.
-    assert "one" in desc_lower
-    assert "multi-turn" in desc_lower or "loop" in desc_lower
-    # Continue-until-done callout.
-    assert "continue" in desc_lower or "until" in desc_lower
-    # Repeatable-group note retained.
-    assert "repeatable" in desc_lower
-
-
-# ============================================================================
-# fix-pass-3 — Anthropic agentic tool-use loop in _extract_one_chunk
-# ============================================================================
-
-
-class FakeToolUseBlockWithId(FakeToolUseBlock):
-    """FakeToolUseBlock with an ``id`` so the tool_use loop can build a
-    matching ``tool_result`` block."""
-
-    _id_counter: int = 0
-
-    def __init__(self, name: str, input_payload: dict[str, Any]) -> None:
-        super().__init__(name, input_payload)
-        FakeToolUseBlockWithId._id_counter += 1
-        self.id = f"toolu_test_{FakeToolUseBlockWithId._id_counter:04d}"
-
-
-def make_tool_use_with_id(
-    *,
-    domain_tag: str,
-    value: Any,
-    confidence: float,
-    source_doc: str = "x.pdf",
-    source_page: int = 1,
-    source_quote: str = "...",
-    needs_review: bool = False,
-    repeatable_group: str | None = None,
-    repeatable_index: int | None = None,
-) -> FakeToolUseBlockWithId:
-    payload: dict[str, Any] = {
-        "domain_tag": domain_tag,
-        "value": value,
-        "source_doc": source_doc,
-        "source_page": source_page,
-        "source_quote": source_quote,
-        "confidence": confidence,
-    }
-    if needs_review:
-        payload["needs_review"] = True
-    if repeatable_group is not None:
-        payload["repeatable_group"] = repeatable_group
-    if repeatable_index is not None:
-        payload["repeatable_index"] = repeatable_index
-    return FakeToolUseBlockWithId("record_extracted_field", payload)
-
-
-def test_tool_use_loop_iterates_until_end_turn(
+def test_messages_create_never_receives_tools_parameter(
     fake_anthropic: MagicMock,
     stub_field_map: StubFieldMap,
     small_pdf: Path,
 ) -> None:
-    """fix-pass-3: when Sonnet emits one tool_use + stop_reason=tool_use
-    on each of N-1 turns and finally end_turn on turn N, the loop must
-    return N tool_use records and terminate cleanly."""
-    responses = [
-        FakeMessage(
-            tool_uses=[
-                make_tool_use_with_id(
-                    domain_tag=f"account.field_{i}", value=f"v{i}", confidence=0.95
-                )
-            ],
-            stop_reason="tool_use",
-            usage=FakeUsage(input_tokens=100, output_tokens=20),
-        )
-        for i in range(4)
-    ]
-    # Final turn — end_turn with no tool_use.
-    responses.append(
-        FakeMessage(
-            tool_uses=[],
-            stop_reason="end_turn",
-            usage=FakeUsage(input_tokens=80, output_tokens=10),
-        )
+    """Hard contract: the JSON-mode client never passes ``tools`` or
+    ``tool_choice`` to ``messages.create``. Tool use was the v1 approach
+    that Sonnet 4.6 didn't reliably honor — this test guards against
+    regression."""
+    fake_anthropic.messages.create.return_value = make_simple_message(
+        fields={
+            "account.named_insured": make_field_entry(value="X", confidence=0.95)
+        }
     )
-    fake_anthropic.messages.create.side_effect = responses
-
-    result = extract_from_pdf(
-        small_pdf,
-        stub_field_map,
-        glossary="g",
-        system_prompt="s",
-        run_id="run-loop-iter",
-    )
-    # 4 tool_use turns + 1 final end_turn = 5 messages.create calls.
-    assert fake_anthropic.messages.create.call_count == 5
-    assert len(result) == 4
-    assert {r.domain_tag for r in result} == {
-        "account.field_0",
-        "account.field_1",
-        "account.field_2",
-        "account.field_3",
-    }
-    # All tagged Sonnet (no escalation since all confidence=0.95).
-    for r in result:
-        assert r.model_used == DEFAULT_SONNET_MODEL
-
-
-def test_tool_use_loop_parallel_emission_still_works(
-    fake_anthropic: MagicMock,
-    stub_field_map: StubFieldMap,
-    small_pdf: Path,
-) -> None:
-    """fix-pass-3: if Claude DOES emit multiple tool_use blocks in one
-    response with stop_reason=end_turn (the documented capability), the
-    loop should record all of them in a single turn."""
-    fake_anthropic.messages.create.return_value = FakeMessage(
-        tool_uses=[
-            make_tool_use_with_id(
-                domain_tag=f"account.field_{i}", value=f"v{i}", confidence=0.95
-            )
-            for i in range(5)
-        ],
-        stop_reason="end_turn",
-    )
-    result = extract_from_pdf(
-        small_pdf,
-        stub_field_map,
-        glossary="g",
-        system_prompt="s",
-        run_id="run-loop-parallel",
-    )
-    # Exactly one API call — Claude emitted everything in turn 1.
-    assert fake_anthropic.messages.create.call_count == 1
-    assert len(result) == 5
-
-
-def test_tool_use_loop_caps_at_max_turns(
-    fake_anthropic: MagicMock,
-    stub_field_map: StubFieldMap,
-    small_pdf: Path,
-    caplog: pytest.LogCaptureFixture,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """fix-pass-3: if Claude refuses to ever stop (returns tool_use on
-    every turn), the loop must terminate at MAX_TOOL_USE_TURNS, log a
-    warning, and return the records gathered so far."""
-    # Pin a small cap so the test runs quickly.
-    monkeypatch.setattr(claude_client, "MAX_TOOL_USE_TURNS", 5)
-
-    fake_anthropic.messages.create.side_effect = [
-        FakeMessage(
-            tool_uses=[
-                make_tool_use_with_id(
-                    domain_tag=f"account.field_{i}", value="v", confidence=0.95
-                )
-            ],
-            stop_reason="tool_use",
-        )
-        for i in range(20)
-    ]
-
-    with caplog.at_level(logging.WARNING, logger="iga.claude"):
-        result = extract_from_pdf(
-            small_pdf,
-            stub_field_map,
-            glossary="g",
-            system_prompt="s",
-            run_id="run-loop-cap",
-        )
-
-    # Exactly MAX_TOOL_USE_TURNS calls; we stop instead of running away.
-    assert fake_anthropic.messages.create.call_count == 5
-    # Each turn appended its (single) record.
-    assert len(result) == 5
-    cap_warnings = [
-        r for r in caplog.records if "tool_loop_max_turns_reached" in r.getMessage()
-    ]
-    assert len(cap_warnings) == 1
-
-
-def test_tool_use_loop_sums_usage_across_turns(
-    fake_anthropic: MagicMock,
-    stub_field_map: StubFieldMap,
-    small_pdf: Path,
-) -> None:
-    """fix-pass-3: per-turn usage must be summed into a single
-    ``_CallUsage`` so the operator-visible aggregate covers every API
-    call the loop made (cached + uncached)."""
-    responses = [
-        FakeMessage(
-            tool_uses=[
-                make_tool_use_with_id(
-                    domain_tag=f"account.field_{i}", value=f"v{i}", confidence=0.95
-                )
-            ],
-            stop_reason="tool_use",
-            usage=FakeUsage(
-                input_tokens=1_000,
-                output_tokens=150,
-                cache_creation_input_tokens=20_000 if i == 0 else 0,
-                cache_read_input_tokens=0 if i == 0 else 19_000,
-            ),
-        )
-        for i in range(3)
-    ]
-    responses.append(
-        FakeMessage(
-            tool_uses=[],
-            stop_reason="end_turn",
-            usage=FakeUsage(
-                input_tokens=500,
-                output_tokens=20,
-                cache_creation_input_tokens=0,
-                cache_read_input_tokens=19_000,
-            ),
-        )
-    )
-    fake_anthropic.messages.create.side_effect = responses
-
-    result = extract_from_pdf(
-        small_pdf,
-        stub_field_map,
-        glossary="g",
-        system_prompt="s",
-        run_id="run-loop-usage",
-    )
-    usage = getattr(result, "cache_usage", None)
-    assert usage is not None
-    # 4 turns total.
-    assert usage.api_calls == 4
-    # 1000 * 3 + 500 = 3500
-    assert usage.input_tokens == 3_500
-    # 150 * 3 + 20 = 470
-    assert usage.output_tokens == 470
-    # 20_000 only on turn 0
-    assert usage.cache_creation_input_tokens == 20_000
-    # 19_000 on turns 1, 2, 3 = 57_000
-    assert usage.cache_read_input_tokens == 57_000
-
-
-def test_tool_use_loop_appends_assistant_and_tool_result_messages(
-    fake_anthropic: MagicMock,
-    stub_field_map: StubFieldMap,
-    small_pdf: Path,
-) -> None:
-    """fix-pass-3: between turns the loop must append:
-       (a) the assistant Message we received, and
-       (b) a user Message of tool_result blocks (one per tool_use,
-           content="recorded", tool_use_id matches the originating block).
-    Verified by inspecting the kwargs of the SECOND messages.create call.
-    """
-    turn1 = FakeMessage(
-        tool_uses=[
-            make_tool_use_with_id(
-                domain_tag="account.named_insured", value="Acme", confidence=0.95
-            )
-        ],
-        stop_reason="tool_use",
-    )
-    turn2 = FakeMessage(tool_uses=[], stop_reason="end_turn")
-    fake_anthropic.messages.create.side_effect = [turn1, turn2]
-
     extract_from_pdf(
         small_pdf,
         stub_field_map,
         glossary="g",
         system_prompt="s",
-        run_id="run-loop-followup",
+        run_id="run-no-tools",
     )
-
-    assert fake_anthropic.messages.create.call_count == 2
-    second_kwargs = fake_anthropic.messages.create.call_args_list[1].kwargs
-    messages = second_kwargs["messages"]
-    # Original user message (PDF + instruction) + assistant turn 1 + user tool_results.
-    assert len(messages) == 3
-    assert messages[0]["role"] == "user"  # initial PDF/instruction message
-    assert messages[1]["role"] == "assistant"
-    # Assistant content == the original tool_use blocks we received.
-    assert messages[1]["content"] == list(turn1.content)
-
-    # User turn carries one tool_result per tool_use we just processed.
-    follow_up_user = messages[2]
-    assert follow_up_user["role"] == "user"
-    tool_results = follow_up_user["content"]
-    assert len(tool_results) == 1
-    tr = tool_results[0]
-    assert tr["type"] == "tool_result"
-    assert tr["content"] == "recorded"
-    # ID matches the originating tool_use.
-    assert tr["tool_use_id"] == turn1.content[0].id
+    kwargs = fake_anthropic.messages.create.call_args.kwargs
+    assert "tools" not in kwargs
+    assert "tool_choice" not in kwargs
 
 
-def test_tool_use_loop_finished_log_emitted(
+def test_user_instruction_describes_json_mode_output(
     fake_anthropic: MagicMock,
     stub_field_map: StubFieldMap,
     small_pdf: Path,
-    caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """The loop must emit a single ``claude.tool_loop_finished`` summary
-    line per chunk, with the turn count and final stop_reason."""
-    fake_anthropic.messages.create.return_value = FakeMessage(
-        tool_uses=[
-            make_tool_use_with_id(
-                domain_tag="account.named_insured", value="X", confidence=0.95
-            )
-        ],
-        stop_reason="end_turn",
+    """The per-call user instruction must tell Claude to return a JSON
+    object (not a tool call). Without this the model could regress to
+    prose output."""
+    fake_anthropic.messages.create.return_value = make_simple_message(
+        fields={
+            "account.named_insured": make_field_entry(value="X", confidence=0.95)
+        }
     )
-
-    with caplog.at_level(logging.INFO, logger="iga.claude"):
-        extract_from_pdf(
-            small_pdf,
-            stub_field_map,
-            glossary="g",
-            system_prompt="s",
-            run_id="run-loop-summary",
-        )
-
-    summary = [
-        r for r in caplog.records if "tool_loop_finished" in r.getMessage()
-    ]
-    assert len(summary) == 1
-    msg = summary[0].getMessage()
-    assert "turns=1" in msg
-    assert "total_tool_calls=1" in msg
-    assert "stop_reason=end_turn" in msg
-
-
-def test_max_tool_use_turns_constant_exposed() -> None:
-    """fix-pass-3: ``MAX_TOOL_USE_TURNS`` must be a module-level constant
-    so future operators / tests can override it."""
-    assert hasattr(claude_client, "MAX_TOOL_USE_TURNS")
-    assert claude_client.MAX_TOOL_USE_TURNS == 60
+    extract_from_pdf(
+        small_pdf,
+        stub_field_map,
+        glossary="g",
+        system_prompt="s",
+        run_id="run-instruction",
+    )
+    kwargs = fake_anthropic.messages.create.call_args.kwargs
+    user_msg = kwargs["messages"][0]
+    instruction_block = user_msg["content"][2]
+    assert instruction_block["type"] == "text"
+    instruction = instruction_block["text"].lower()
+    assert "json" in instruction
+    assert "fields" in instruction
+    assert "repeatables" in instruction

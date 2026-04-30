@@ -116,11 +116,14 @@ _DEFAULT_GLOSSARY: str = _load_prompt_asset(
 _DEFAULT_SYSTEM_PROMPT: str = _load_prompt_asset(
     "system_prompt.txt",
     fallback=(
-        "You are an expert insurance-data extraction assistant. For every field "
-        "you can identify in the attached PDF, call the record_extracted_field "
-        "tool exactly once with a stable domain_tag, the literal source quote, "
-        "the page number, and your confidence (0.0-1.0). If a field is missing "
-        "or ambiguous, set needs_review=true and explain in source_quote."
+        "You are an expert insurance-data extraction assistant. For the "
+        "attached PDF, return ONE JSON object with two top-level keys: "
+        "`fields` (a dict keyed by canonical domain_tag, each entry a dict "
+        "with value, confidence, source_page, source_quote, needs_review) "
+        "and `repeatables` (a dict keyed by group name — vehicle, driver, "
+        "location, loss_payee, additional_insured, prior_carrier, loss — "
+        "each value a list of items). Return ONLY the JSON object — no "
+        "prose, no markdown fences."
     ),
 )
 

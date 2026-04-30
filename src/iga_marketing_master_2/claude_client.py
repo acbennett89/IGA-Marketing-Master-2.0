@@ -5,8 +5,10 @@ Owns all Claude API interaction:
 - Default model: Sonnet 4.6. Auto-escalation to Opus 4.7 per-field on
   ``confidence < CONFIDENCE_LOW_THRESHOLD`` OR ``needs_review`` OR
   required-field-missing.
-- Tool use (single ``record_extracted_field`` tool with ``domain_tag`` enum
-  regenerated per call from the live Field Map). Not JSON mode.
+- JSON-mode output (NOT tool use). The system prompt embeds the literal
+  expected JSON schema; Claude returns one JSON object containing every
+  extracted field plus every repeatable item. The pipeline parses that
+  object with ``json.loads`` and emits one ``ExtractedField`` per entry.
 - Two prompt-cache breakpoints: stable system+glossary+examples, then
   Field Map.
 - PDF document blocks with pagecount/size preflight; auto-split at 80-page
@@ -32,6 +34,7 @@ import hashlib
 import io
 import json
 import logging
+import re
 import time
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -60,10 +63,10 @@ __all__ = [
     "ClaudeServerError",
     "ClaudePDFTooLargeError",
     "ClaudeCacheMissError",
+    "ClaudeParseError",
     "FieldMap",
     "extract_from_pdf",
     "reextract_low_confidence_fields",
-    "build_record_field_tool_schema",
 ]
 
 # ----- Module-level constants (per ARCHITECTURE.md Appendix A) ----------------
@@ -77,20 +80,25 @@ DEFAULT_OPUS_MODEL: str = "claude-opus-4-7"
 RETRY_BACKOFF_SECONDS: tuple[int, ...] = (1, 2, 4, 8)
 MAX_TOKENS_PER_CALL: int = 16_384
 
-# Anthropic agentic-loop hard cap. Sonnet 4.6 prefers the documented
-# multi-turn tool-use pattern: emit ONE tool_use, receive ONE tool_result,
-# then continue. ``MAX_TOOL_USE_TURNS`` bounds the loop so a malformed
-# prompt (e.g., Claude refusing to ever stop) can't run away. Per
-# fix-pass-3: 60 turns is plenty for a 20-60-field dec page; the
-# conversation grows by ~300 tokens per turn so 60 turns adds ~18K
-# uncached tokens — acceptable.
-MAX_TOOL_USE_TURNS: int = 60
-
 # Sonnet 4.6 cache breakpoint minimum (RESEARCH.md Finding 5)
 SONNET_CACHE_MIN_TOKENS: int = 2_048
 
 # Heuristic for breakpoint sizing warnings (chars per token)
 _CHARS_PER_TOKEN_HEURISTIC: int = 4
+
+# Repeatable groups recognized in the JSON ``repeatables`` block. Any
+# group key Claude emits will be honored; this list documents the
+# canonical set the system prompt also lists. Group names are NOT enforced
+# at parse time so a JIT-proposal flow can still surface novel groups.
+_KNOWN_REPEATABLE_GROUPS: tuple[str, ...] = (
+    "vehicle",
+    "driver",
+    "location",
+    "loss_payee",
+    "additional_insured",
+    "prior_carrier",
+    "loss",
+)
 
 logger = logging.getLogger("iga.claude")
 
@@ -122,6 +130,17 @@ class ClaudeCacheMissError(ClaudeError):
     """NEVER raised; cache miss is a warning, not an error.
 
     Reserved for symmetry with ARCHITECTURE.md §6.8.
+    """
+
+
+class ClaudeParseError(ClaudeError):
+    """Claude returned text that could not be parsed as the expected JSON object.
+
+    Raised by :func:`_parse_json_object` when the response text isn't valid
+    JSON, isn't a JSON object, or is missing entirely. The extraction-agent
+    surfaces this to the operator as a per-doc error in the
+    ``ExtractionResult``; the run as a whole continues so other PDFs still
+    get processed.
     """
 
 
@@ -234,69 +253,14 @@ class FieldMap(Protocol):
 SystemPromptPart = Mapping[str, Any]
 
 
-# ----- Tool schema build (per ARCHITECTURE.md §6.2) ---------------------------
-
-
-def build_record_field_tool_schema(field_map: FieldMap) -> dict[str, Any]:
-    """Build the ``record_extracted_field`` tool input schema.
-
-    The ``domain_tag`` enum is regenerated per call from the live Field Map.
-    If the Field Map has no populated ``domain_tag`` values yet (early v1),
-    the enum constraint is omitted and the tag is free-text. The Extractor
-    is responsible for queuing every recorded tag for JIT confirmation in
-    that case.
-    """
-    enum_values = sorted(_safe_generate_domain_tag_enum(field_map))
-    domain_tag_property: dict[str, Any] = {"type": "string"}
-    # Bootstrapping case: a fresh Field Map has no tags yet. Letting Claude
-    # invent strings (which we then queue for human confirmation) is the only
-    # way to get the system off the ground without a hand-written tag list.
-    if enum_values:
-        domain_tag_property["enum"] = enum_values
-    return {
-        "name": "record_extracted_field",
-        "description": (
-            "Record ONE extracted insurance field, keyed by its domain_tag. "
-            "You are in a multi-turn tool-use loop: each call records one "
-            "field, after which you may immediately make another call for the "
-            "next field. Continue until every extractable field in the document "
-            "is recorded, then end your turn. A typical dec page has 20-60 "
-            "fields. Repeatable items (vehicles, drivers, locations, loss "
-            "payees) get one call per item with repeatable_group + "
-            "repeatable_index set."
-        ),
-        "input_schema": {
-            "type": "object",
-            "required": [
-                "domain_tag",
-                "value",
-                "source_doc",
-                "source_page",
-                "source_quote",
-                "confidence",
-            ],
-            "properties": {
-                "domain_tag": domain_tag_property,
-                "value": {"type": ["string", "number", "boolean", "null"]},
-                "source_doc": {"type": "string"},
-                "source_page": {"type": "integer", "minimum": 1},
-                "source_quote": {"type": "string"},
-                "confidence": {"type": "number", "minimum": 0, "maximum": 1},
-                "needs_review": {"type": "boolean"},
-                "repeatable_group": {"type": "string"},
-                "repeatable_index": {"type": "integer", "minimum": 0},
-            },
-            "additionalProperties": False,
-        },
-    }
+# ----- Field Map enum helper --------------------------------------------------
 
 
 def _safe_generate_domain_tag_enum(field_map: FieldMap) -> list[str]:
     """Call ``field_map.generate_domain_tag_enum()`` defensively.
 
     The Field Map module is owned by another agent and may not be loaded
-    in unit tests. Falls back to an empty enum (free-text mode) on any
-    failure.
+    in unit tests. Falls back to an empty enum on any failure.
     """
     try:
         result = field_map.generate_domain_tag_enum()
@@ -648,13 +612,16 @@ def _build_request(
     system_prompt: str,
     model: str,
     user_instruction: str,
-    tool_schema: dict[str, Any],
 ) -> dict[str, Any]:
     """Build the kwargs dict passed to ``client.messages.create``.
 
     Two cache_control breakpoints per ARCHITECTURE.md §6.3:
       BP1 = system block (system_prompt + glossary + examples)
       BP2 = first user text block (Field Map + notes_for_claude)
+
+    NO ``tools`` parameter — output is a single JSON object the model
+    writes as plain text. The system prompt embeds the literal expected
+    schema (see ``assets/prompts/system_prompt.txt``).
     """
     system_text = _build_system_text(system_prompt=system_prompt, glossary=glossary)
     field_map_text = _serialize_field_map_for_prompt(field_map)
@@ -669,9 +636,9 @@ def _build_request(
     if pdf_chunk.basename != pdf_chunk.source_basename:
         full_instruction = (
             f"{user_instruction}\n\nNote: this is pages {pdf_chunk.start_page}-{pdf_chunk.end_page} "
-            f"of '{pdf_chunk.source_basename}'. Use the original document basename "
-            f"('{pdf_chunk.source_basename}') as source_doc and report source_page "
-            f"as the page number within this chunk's range."
+            f"of '{pdf_chunk.source_basename}'. Treat the PDF you are seeing as a "
+            f"slice of that larger document and report `source_page` as the page "
+            f"number within this slice."
         )
 
     # Two prompt-cache breakpoints. Anthropic only caches identical prefixes,
@@ -713,8 +680,6 @@ def _build_request(
                 ],
             }
         ],
-        "tools": [tool_schema],
-        "tool_choice": {"type": "any"},
     }
 
     _warn_if_breakpoint_below_min(system_text, label="system_prompt+glossary")
@@ -871,71 +836,310 @@ def _create_message_with_retry(
 # ----- Response parsing ------------------------------------------------------
 
 
-def _extract_tool_use_records(
-    response: Any,
+_MARKDOWN_FENCE_OPEN_RE = re.compile(r"^\s*```(?:json)?\s*", re.IGNORECASE)
+_MARKDOWN_FENCE_CLOSE_RE = re.compile(r"\s*```\s*$")
+
+
+def _extract_text_from_response(response: Any) -> str:
+    """Concatenate all text blocks in ``response.content``.
+
+    Tool-use blocks (which we don't expect anymore) are ignored. Returns
+    empty string if no text blocks are present so the caller can decide
+    how to surface that as a parse error.
+    """
+    parts: list[str] = []
+    for block in getattr(response, "content", []) or []:
+        if getattr(block, "type", None) == "text":
+            text = getattr(block, "text", "")
+            if isinstance(text, str):
+                parts.append(text)
+    return "".join(parts).strip()
+
+
+def _parse_json_object(raw: str) -> dict[str, Any]:
+    """Strip optional markdown fences and parse ``raw`` into a JSON dict.
+
+    Mirrors v1's ``_parse_json_object`` helper. Accepts a single-element
+    list as a courtesy (Claude occasionally wraps the object in a list when
+    it gets confused by the "schema as example" pattern). Raises
+    :class:`ClaudeParseError` on any failure so the caller can surface a
+    typed error rather than a JSONDecodeError stack trace.
+    """
+    if not raw or not raw.strip():
+        raise ClaudeParseError(
+            "Claude returned an empty response — no JSON object to parse."
+        )
+    text = raw.strip()
+    text = _MARKDOWN_FENCE_OPEN_RE.sub("", text, count=1)
+    text = _MARKDOWN_FENCE_CLOSE_RE.sub("", text, count=1)
+    text = text.strip()
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as exc:
+        snippet = text[:200].replace("\n", " ")
+        raise ClaudeParseError(
+            f"Claude response was not valid JSON: {exc.msg} at line {exc.lineno} "
+            f"col {exc.colno}. First 200 chars: {snippet!r}"
+        ) from exc
+    if isinstance(data, list) and len(data) == 1:
+        data = data[0]
+    if not isinstance(data, dict):
+        raise ClaudeParseError(
+            f"Expected JSON object, got {type(data).__name__}."
+        )
+    return data
+
+
+def _records_from_parsed_json(
+    parsed: Mapping[str, Any],
     *,
     pdf_chunk: _PdfChunk,
     model: str,
 ) -> list[ExtractedField]:
-    """Parse ``response.content`` into ``ExtractedField`` records.
+    """Walk a parsed JSON object and emit ``ExtractedField`` records.
 
-    Only ``tool_use`` blocks named ``record_extracted_field`` are honored.
-    ``source_doc`` from Claude is ignored in favor of the original PDF
-    basename to keep records canonical across split chunks.
+    The expected shape is::
+
+        {
+          "fields": {
+            "<domain_tag>": {
+              "value": ..., "confidence": ..., "source_page": ...,
+              "source_quote": ..., "needs_review": ...
+            },
+            ...
+          },
+          "repeatables": {
+            "<group>": [
+              { "<group>.<sub>": ..., ..., "_confidence": ..., ... },
+              ...
+            ],
+            ...
+          }
+        }
+
+    Any malformed entry is logged at WARNING and skipped — a single bad
+    row should not nuke a 30-field response.
     """
     records: list[ExtractedField] = []
-    content = getattr(response, "content", []) or []
-    for block in content:
-        block_type = getattr(block, "type", None)
-        if block_type != "tool_use":
-            continue
-        name = getattr(block, "name", None)
-        if name != "record_extracted_field":
-            logger.warning("claude.unexpected_tool name=%s", name)
-            continue
-        raw_input = getattr(block, "input", None) or {}
-        try:
-            record = _record_from_tool_input(
-                raw_input, source_basename=pdf_chunk.source_basename, model=model
-            )
-        except (KeyError, TypeError, ValueError) as exc:
-            logger.warning("claude.tool_input_invalid error=%s input=%r", exc, raw_input)
-            continue
-        records.append(record)
+
+    fields = parsed.get("fields")
+    if isinstance(fields, Mapping):
+        for domain_tag, payload in fields.items():
+            if not isinstance(domain_tag, str):
+                logger.warning(
+                    "claude.json_field_invalid_key key=%r (not a string)", domain_tag
+                )
+                continue
+            if not isinstance(payload, Mapping):
+                logger.warning(
+                    "claude.json_field_invalid_payload tag=%s payload=%r",
+                    domain_tag,
+                    payload,
+                )
+                continue
+            try:
+                record = _record_from_field_entry(
+                    domain_tag,
+                    payload,
+                    source_basename=pdf_chunk.source_basename,
+                    model=model,
+                )
+            except (KeyError, TypeError, ValueError) as exc:
+                logger.warning(
+                    "claude.json_field_invalid tag=%s error=%s payload=%r",
+                    domain_tag,
+                    exc,
+                    payload,
+                )
+                continue
+            records.append(record)
+
+    repeatables = parsed.get("repeatables")
+    if isinstance(repeatables, Mapping):
+        for group_name, items in repeatables.items():
+            if not isinstance(group_name, str):
+                logger.warning(
+                    "claude.json_repeatable_invalid_group group=%r (not a string)",
+                    group_name,
+                )
+                continue
+            if not isinstance(items, list):
+                logger.warning(
+                    "claude.json_repeatable_invalid_items group=%s items=%r",
+                    group_name,
+                    items,
+                )
+                continue
+            for index, item in enumerate(items):
+                if not isinstance(item, Mapping):
+                    logger.warning(
+                        "claude.json_repeatable_invalid_item group=%s index=%d item=%r",
+                        group_name,
+                        index,
+                        item,
+                    )
+                    continue
+                records.extend(
+                    _records_from_repeatable_item(
+                        group_name=group_name,
+                        index=index,
+                        item=item,
+                        source_basename=pdf_chunk.source_basename,
+                        model=model,
+                    )
+                )
+
     return records
 
 
-def _record_from_tool_input(
-    raw: Mapping[str, Any],
+def _record_from_field_entry(
+    domain_tag: str,
+    payload: Mapping[str, Any],
     *,
     source_basename: str,
     model: str,
 ) -> ExtractedField:
-    """Convert a single ``tool_use.input`` dict to an ``ExtractedField``."""
-    domain_tag = str(raw["domain_tag"])
-    value = raw.get("value")
-    source_page = int(raw["source_page"])
-    source_quote = str(raw.get("source_quote", ""))
-    confidence = float(raw["confidence"])
-    needs_review = bool(raw.get("needs_review", False))
-    repeatable_group = raw.get("repeatable_group")
-    repeatable_index = raw.get("repeatable_index")
-    if repeatable_group is not None:
-        repeatable_group = str(repeatable_group)
-    if repeatable_index is not None:
-        repeatable_index = int(repeatable_index)
+    """Build an ExtractedField for a single ``fields[<tag>]`` entry."""
+    if "value" not in payload:
+        raise KeyError("missing 'value'")
+    if "confidence" not in payload:
+        raise KeyError("missing 'confidence'")
+    if "source_page" not in payload:
+        raise KeyError("missing 'source_page'")
     return ExtractedField(
-        domain_tag=domain_tag,
-        value=value,
+        domain_tag=str(domain_tag),
+        value=payload.get("value"),
         source_doc=source_basename,
-        source_page=source_page,
-        source_quote=source_quote,
-        confidence=confidence,
-        needs_review=needs_review,
-        repeatable_group=repeatable_group,
-        repeatable_index=repeatable_index,
+        source_page=int(payload["source_page"]),
+        source_quote=str(payload.get("source_quote", "")),
+        confidence=float(payload["confidence"]),
+        needs_review=bool(payload.get("needs_review", False)),
+        repeatable_group=None,
+        repeatable_index=None,
         model_used=model,
     )
+
+
+def _records_from_repeatable_item(
+    *,
+    group_name: str,
+    index: int,
+    item: Mapping[str, Any],
+    source_basename: str,
+    model: str,
+) -> list[ExtractedField]:
+    """Emit one ExtractedField per (sub_field) inside a repeatable item.
+
+    Metadata keys (``_confidence``, ``_source_page``, ``_source_quote``,
+    ``_needs_review``) are pulled off the item and applied uniformly to
+    every emitted record. A sub-field with its own confidence/quote on a
+    nested dict is also supported (see ``_split_record_or_use_metadata``).
+    """
+    # Pull item-level metadata.
+    item_confidence_raw = item.get("_confidence")
+    item_page_raw = item.get("_source_page")
+    item_quote = str(item.get("_source_quote", ""))
+    item_needs_review = bool(item.get("_needs_review", False))
+
+    try:
+        item_confidence = (
+            float(item_confidence_raw) if item_confidence_raw is not None else None
+        )
+    except (TypeError, ValueError):
+        logger.warning(
+            "claude.json_repeatable_invalid_metadata group=%s index=%d "
+            "_confidence=%r — skipping item",
+            group_name,
+            index,
+            item_confidence_raw,
+        )
+        return []
+
+    try:
+        item_page = int(item_page_raw) if item_page_raw is not None else None
+    except (TypeError, ValueError):
+        logger.warning(
+            "claude.json_repeatable_invalid_metadata group=%s index=%d "
+            "_source_page=%r — skipping item",
+            group_name,
+            index,
+            item_page_raw,
+        )
+        return []
+
+    records: list[ExtractedField] = []
+    for sub_key, sub_value in item.items():
+        if not isinstance(sub_key, str):
+            continue
+        if sub_key.startswith("_"):
+            # Item-level metadata, already consumed.
+            continue
+        # The convention is `<group>.<sub>` — but we accept bare `<sub>`
+        # too and rewrite it to `<group>.<sub>` so prompts that drift from
+        # the schema still produce usable records.
+        if "." in sub_key:
+            domain_tag = sub_key
+        else:
+            domain_tag = f"{group_name}.{sub_key}"
+
+        # If a sub-field is itself a {value, confidence, ...} dict, honor
+        # it; otherwise treat the value as the literal value and inherit
+        # item-level metadata.
+        if isinstance(sub_value, Mapping) and "value" in sub_value:
+            value = sub_value.get("value")
+            confidence_raw = sub_value.get("confidence", item_confidence)
+            page_raw = sub_value.get("source_page", item_page)
+            quote = str(sub_value.get("source_quote", item_quote))
+            needs_review = bool(sub_value.get("needs_review", item_needs_review))
+        else:
+            value = sub_value
+            confidence_raw = item_confidence
+            page_raw = item_page
+            quote = item_quote
+            needs_review = item_needs_review
+
+        if confidence_raw is None or page_raw is None:
+            logger.warning(
+                "claude.json_repeatable_field_missing_metadata group=%s index=%d "
+                "tag=%s confidence=%r page=%r",
+                group_name,
+                index,
+                domain_tag,
+                confidence_raw,
+                page_raw,
+            )
+            continue
+
+        try:
+            confidence = float(confidence_raw)
+            page = int(page_raw)
+        except (TypeError, ValueError):
+            logger.warning(
+                "claude.json_repeatable_field_invalid_metadata group=%s index=%d "
+                "tag=%s confidence=%r page=%r",
+                group_name,
+                index,
+                domain_tag,
+                confidence_raw,
+                page_raw,
+            )
+            continue
+
+        records.append(
+            ExtractedField(
+                domain_tag=domain_tag,
+                value=value,
+                source_doc=source_basename,
+                source_page=page,
+                source_quote=quote,
+                confidence=confidence,
+                needs_review=needs_review,
+                repeatable_group=group_name,
+                repeatable_index=index,
+                model_used=model,
+            )
+        )
+    return records
 
 
 # ----- Cache verification + debug artifact saving ----------------------------
@@ -1054,8 +1258,6 @@ def _response_to_dict(response: Any) -> dict[str, Any]:
         "content": [
             {
                 "type": getattr(b, "type", None),
-                "name": getattr(b, "name", None),
-                "input": getattr(b, "input", None),
                 "text": getattr(b, "text", None),
             }
             for b in getattr(response, "content", []) or []
@@ -1086,7 +1288,6 @@ class _CallContext:
     field_map: FieldMap
     glossary: str
     system_prompt: str
-    tool_schema: dict[str, Any]
     call_counter: dict[str, int] = field(default_factory=dict)
     expected_cached: bool = False  # flips to True after the first successful call
 
@@ -1104,187 +1305,91 @@ def _extract_one_chunk(
     user_instruction: str,
     cache_miss_reason_hint: str | None = None,
 ) -> tuple[list[ExtractedField], _CallUsage]:
-    """Run extraction on a single chunk via the Anthropic multi-turn tool-use loop.
+    """Run extraction on a single chunk via a single JSON-mode API call.
 
-    Per Anthropic's tool-use docs (and confirmed empirically with Sonnet
-    4.6 in fix-pass-3 diagnostics), Claude prefers an iterative pattern:
-    emit ONE ``record_extracted_field`` tool_use, receive a ``tool_result``
-    of ``"recorded"``, then continue with the NEXT field on the next turn.
-    A single response with many parallel tool_use blocks is the documented
-    capability but Sonnet still gates itself to one block per response.
+    The Anthropic call has NO ``tools`` parameter; the system prompt
+    embeds the literal expected JSON schema and Claude returns one big
+    JSON object as text content. We parse it with :func:`_parse_json_object`
+    and emit ExtractedField records via :func:`_records_from_parsed_json`.
 
-    Loop control:
-
-      1. Build the initial request (system prompt + Field Map + PDF +
-         instruction).
-      2. messages.create → parse tool_use blocks → log call → accumulate
-         records and usage.
-      3. If ``stop_reason == "tool_use"``: append the assistant message
-         and a synthetic user message of ``tool_result`` blocks (one per
-         tool_use, ``content="recorded"``), then loop back to step 2 with
-         the augmented messages list.
-      4. Any other ``stop_reason`` (``end_turn``, ``max_tokens``,
-         ``stop_sequence``): exit cleanly.
-      5. ``MAX_TOOL_USE_TURNS`` is the hard cap — log a warning and stop
-         if Claude won't end its turn.
-
-    Returns the union of records across all turns + a summed
-    :class:`_CallUsage` so the per-doc aggregate sees all token spend
-    (cached + uncached).
+    A parse error is surfaced as :class:`ClaudeParseError` so the caller
+    can attach it to a per-doc error. Other typed Claude errors (auth,
+    rate limit, server) propagate unchanged.
     """
-    base_request = _build_request(
+    request = _build_request(
         pdf_chunk=chunk,
         field_map=ctx.field_map,
         glossary=ctx.glossary,
         system_prompt=ctx.system_prompt,
         model=model,
         user_instruction=user_instruction,
-        tool_schema=ctx.tool_schema,
     )
 
-    # Working copy of the conversation. The system block + tools live at
-    # the top level of the kwargs dict; only ``messages`` grows turn over
-    # turn. The cache_control breakpoints stay on the FRONT of the
-    # conversation (system + Field Map text block in the first user
-    # message), so each subsequent turn should report cache_read > 0.
-    messages: list[dict[str, Any]] = list(base_request["messages"])
-
-    collected_records: list[ExtractedField] = []
-    total_usage = _CallUsage()
-    last_stop: str | None = None
-    last_response: Any = None
-    turn_idx = 0
-
-    for turn_idx in range(MAX_TOOL_USE_TURNS):
-        request = dict(base_request)
-        request["messages"] = messages
-
-        try:
-            response = _create_message_with_retry(ctx.client, request=request)
-        except ClaudeError:
-            # Try to dump the request even on failure for debug forensics.
-            if ctx.debug_dir is not None:
-                try:
-                    call_n = ctx.next_call_number(chunk.basename)
-                    ctx.debug_dir.mkdir(parents=True, exist_ok=True)
-                    req_path = (
-                        ctx.debug_dir / f"{chunk.basename}-call_{call_n}.req.json"
-                    )
-                    req_path.write_text(
-                        json.dumps(_elide_pdf_base64(request), indent=2, default=str),
-                        encoding="utf-8",
-                    )
-                except OSError:  # pragma: no cover - best effort
-                    pass
-            raise
-
-        # First turn of the chunk uses the caller's cache-miss hint; later
-        # turns are always expected to hit cache (the system + Field Map
-        # prefix is identical across turns).
-        turn_hint = cache_miss_reason_hint if turn_idx == 0 else None
-        turn_expected_cached = ctx.expected_cached or turn_idx > 0
-        _log_cache_usage(
-            response,
-            run_id=ctx.run_id,
-            model=model,
-            doc_basename=chunk.basename,
-            expected_cached=turn_expected_cached,
-            cache_miss_reason_hint=turn_hint,
-        )
-
+    try:
+        response = _create_message_with_retry(ctx.client, request=request)
+    except ClaudeError:
+        # Try to dump the request even on failure for debug forensics.
         if ctx.debug_dir is not None:
-            call_n = ctx.next_call_number(chunk.basename)
-            _save_debug_artifacts(
-                debug_dir=ctx.debug_dir,
-                doc_id=chunk.basename,
-                call_n=call_n,
-                request=request,
-                response=response,
-            )
+            try:
+                call_n = ctx.next_call_number(chunk.basename)
+                ctx.debug_dir.mkdir(parents=True, exist_ok=True)
+                req_path = (
+                    ctx.debug_dir / f"{chunk.basename}-call_{call_n}.req.json"
+                )
+                req_path.write_text(
+                    json.dumps(_elide_pdf_base64(request), indent=2, default=str),
+                    encoding="utf-8",
+                )
+            except OSError:  # pragma: no cover - best effort
+                pass
+        raise
 
-        # After the first successful call the system+field_map prefix is
-        # in the cache; subsequent calls are expected to hit it.
-        ctx.expected_cached = True
+    _log_cache_usage(
+        response,
+        run_id=ctx.run_id,
+        model=model,
+        doc_basename=chunk.basename,
+        expected_cached=ctx.expected_cached,
+        cache_miss_reason_hint=cache_miss_reason_hint,
+    )
 
-        new_records = _extract_tool_use_records(
-            response, pdf_chunk=chunk, model=model
+    if ctx.debug_dir is not None:
+        call_n = ctx.next_call_number(chunk.basename)
+        _save_debug_artifacts(
+            debug_dir=ctx.debug_dir,
+            doc_id=chunk.basename,
+            call_n=call_n,
+            request=request,
+            response=response,
         )
-        collected_records.extend(new_records)
-        total_usage.add(_usage_from_response(response))
 
-        last_response = response
-        last_stop = getattr(response, "stop_reason", None)
+    # After the first successful call the system+field_map prefix is
+    # in the cache; subsequent calls are expected to hit it.
+    ctx.expected_cached = True
 
-        if last_stop != "tool_use":
-            # Claude signaled it's done (end_turn / max_tokens / stop_sequence)
-            # OR the response had no usable tool_use blocks. Exit the loop.
-            break
-
-        # Claude wants to continue — append the assistant turn and a
-        # tool_result for every record_extracted_field tool_use we just
-        # processed, then re-enter the loop.
-        assistant_content = getattr(response, "content", []) or []
-        messages.append({"role": "assistant", "content": list(assistant_content)})
-
-        tool_results: list[dict[str, Any]] = []
-        for block in assistant_content:
-            if getattr(block, "type", None) != "tool_use":
-                continue
-            if getattr(block, "name", None) != "record_extracted_field":
-                continue
-            tool_use_id = getattr(block, "id", None)
-            if not tool_use_id:
-                continue
-            # Plain dicts are accepted by the SDK as ToolResultBlockParam —
-            # no need to import a specific type. Content is a constant
-            # acknowledgment so it doesn't bloat the conversation.
-            tool_results.append(
-                {
-                    "type": "tool_result",
-                    "tool_use_id": tool_use_id,
-                    "content": "recorded",
-                }
-            )
-
-        if not tool_results:
-            # Defensive: stop_reason was tool_use but we have no tool_use
-            # blocks to acknowledge. Without a tool_result Claude would
-            # 400 the next request, so break out cleanly.
-            logger.warning(
-                "claude.tool_use_loop_no_tool_results run_id=%s doc=%s turn=%d",
-                ctx.run_id,
-                chunk.basename,
-                turn_idx + 1,
-            )
-            break
-
-        messages.append({"role": "user", "content": tool_results})
-    else:
-        # for-else: we exhausted MAX_TOOL_USE_TURNS without seeing a
-        # non-tool_use stop_reason. Log + stop with what we have.
+    text = _extract_text_from_response(response)
+    if not text:
         logger.warning(
-            "claude.tool_loop_max_turns_reached run_id=%s doc=%s turns=%d records=%d",
+            "claude.empty_response run_id=%s doc=%s — no text content",
             ctx.run_id,
             chunk.basename,
-            MAX_TOOL_USE_TURNS,
-            len(collected_records),
+        )
+        raise ClaudeParseError(
+            f"Claude returned no text content for {chunk.basename}."
         )
 
+    parsed = _parse_json_object(text)
+    records = _records_from_parsed_json(parsed, pdf_chunk=chunk, model=model)
+
     logger.info(
-        "claude.tool_loop_finished run_id=%s doc=%s turns=%d total_tool_calls=%d "
-        "stop_reason=%s",
+        "claude.json_parsed run_id=%s doc=%s records=%d stop_reason=%s",
         ctx.run_id,
         chunk.basename,
-        turn_idx + 1,
-        len(collected_records),
-        last_stop,
+        len(records),
+        getattr(response, "stop_reason", "<unknown>"),
     )
 
-    # Suppress an unused-variable lint: ``last_response`` is retained for
-    # future debugging hooks (e.g., dumping the final assistant turn).
-    del last_response
-
-    return collected_records, total_usage
+    return records, _usage_from_response(response)
 
 
 # ----- Merge across chunks ---------------------------------------------------
@@ -1335,13 +1440,15 @@ def extract_from_pdf(
     Workflow:
 
     1. Preflight + (if needed) split at 80-page boundaries with 1-page overlap.
-    2. Build the ``record_extracted_field`` tool schema from the live Field Map.
-    3. First pass against Sonnet 4.6 (or Opus if ``force_opus``) per chunk.
-    4. Auto-escalation: any field with ``confidence < 0.7`` OR
+    2. First pass against Sonnet 4.6 (or Opus if ``force_opus``) per chunk.
+       Each call returns a single JSON object that we parse into one
+       ExtractedField per ``fields`` entry plus one ExtractedField per
+       sub-field of every ``repeatables[group][index]``.
+    3. Auto-escalation: any field with ``confidence < 0.7`` OR
        ``needs_review`` OR required-and-empty is re-prompted against
        Opus 4.7. The Opus result replaces the Sonnet record and is tagged
        ``model_used="claude-opus-4-7"`` for GUI badging.
-    5. Cache + token usage is logged INFO on every call; cache miss is
+    4. Cache + token usage is logged INFO on every call; cache miss is
        logged WARNING (never raised).
 
     ``debug_dir`` is the per-doc claude debug directory the caller wants
@@ -1353,7 +1460,6 @@ def extract_from_pdf(
 
     client = _resolve_client(api_key)
     chunks = _read_pdf_chunks(pdf_path, debug_dir=debug_dir, run_id=run_id)
-    tool_schema = build_record_field_tool_schema(field_map)
 
     ctx = _CallContext(
         run_id=run_id,
@@ -1362,20 +1468,19 @@ def extract_from_pdf(
         field_map=field_map,
         glossary=glossary,
         system_prompt=system_prompt,
-        tool_schema=tool_schema,
     )
 
     initial_model = DEFAULT_OPUS_MODEL if force_opus else DEFAULT_SONNET_MODEL
     user_instruction = (
-        "Extract every relevant insurance field from the attached PDF. "
-        "For each one, call the record_extracted_field tool exactly once. "
-        "Use the canonical domain_tag from the FIELD MAP block above. "
-        "If a field appears in a repeatable group (vehicle/driver/location/"
-        "loss_payee/additional_insured/prior_carrier/loss), set repeatable_group "
-        "to the group name and repeatable_index starting at 0. "
-        "Always include a verbatim source_quote and the source_page (1-indexed). "
-        "If you are unsure about a value, set confidence accordingly and set "
-        "needs_review=true."
+        "Read the attached PDF and extract every relevant insurance field. "
+        "Return ONE JSON object matching the schema in the system prompt: "
+        "non-repeatable fields under `fields` keyed by canonical domain_tag; "
+        "repeatable items (vehicle/driver/location/loss_payee/additional_insured/"
+        "prior_carrier/loss) grouped under `repeatables`. Use the canonical "
+        "domain_tag from the FIELD MAP block above. For each field include "
+        "`value`, `confidence`, `source_page` (1-indexed), a verbatim "
+        "`source_quote`, and `needs_review`. Return ONLY the JSON object — "
+        "no prose, no markdown fences."
     )
 
     chunk_records: list[list[ExtractedField]] = []
@@ -1459,7 +1564,6 @@ def reextract_low_confidence_fields(
 
     client = _resolve_client(api_key)
     chunks = _read_pdf_chunks(pdf_path, debug_dir=debug_dir, run_id=run_id)
-    tool_schema = build_record_field_tool_schema(field_map)
 
     ctx = _CallContext(
         run_id=run_id,
@@ -1468,7 +1572,6 @@ def reextract_low_confidence_fields(
         field_map=field_map,
         glossary=glossary,
         system_prompt=system_prompt,
-        tool_schema=tool_schema,
     )
 
     opus_records, opus_usage = _reextract_against_opus(
@@ -1532,11 +1635,13 @@ def _opus_reextract_instruction(target_fields: Sequence[ExtractedField]) -> str:
         bullets.append(bullet)
     body = "\n".join(bullets)
     return (
-        "These specific fields had low confidence on the first pass — please look "
-        "at the attached PDF again and be precise. For each one, call "
-        "record_extracted_field with your best value and a confidence between 0 "
-        "and 1. If you genuinely cannot find a value, return null with "
-        "needs_review=true and explain in the source_quote.\n\n"
+        "These specific fields had low confidence on the first pass — please "
+        "look at the attached PDF again and be precise. Return one JSON object "
+        "matching the schema in the system prompt; the `fields` block must "
+        "contain an entry for each tag listed below with your best `value` "
+        "and a `confidence` between 0 and 1. If you genuinely cannot find a "
+        "value, return `value: null` with `needs_review: true` and explain in "
+        "the `source_quote`. Return ONLY the JSON object.\n\n"
         f"Fields to re-examine:\n{body}"
     )
 
