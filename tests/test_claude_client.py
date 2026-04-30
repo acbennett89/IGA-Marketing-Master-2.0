@@ -1172,6 +1172,91 @@ def test_invalid_tool_input_is_skipped_not_raised(
     assert len(bad_input) == 1
 
 
+# ============================================================================
+# Field Map prompt block (Bug 3 regression)
+# ============================================================================
+
+
+def test_serialize_field_map_against_real_field_map_clears_2048_tokens() -> None:
+    """Regression for Bug 3: the on-disk Field Map JSON must produce a
+    prompt block that comfortably exceeds the 2,048-token Sonnet 4.6
+    cache-prefix minimum (RESEARCH.md Finding 5). Before the fix the
+    block was 28 tokens (just the empty enum placeholder) so the cache
+    breakpoint never activated and Claude got no field universe at all.
+    """
+    from iga_marketing_master_2 import field_map as field_map_mod
+
+    fm = field_map_mod.load()
+    text = claude_client._serialize_field_map_for_prompt(fm)
+    # Use the same chars/token heuristic claude_client uses internally.
+    approx_tokens = len(text) // 4
+    assert approx_tokens > 2048, (
+        f"Field Map prompt block only {approx_tokens} tokens — Sonnet's "
+        f"2048-token cache threshold won't activate, and Claude won't see "
+        f"the EPIC field universe."
+    )
+    # Sanity-check that the block actually contains screen/field content
+    # (not just a screen of placeholders).
+    assert "## Screen:" in text
+    assert "label=" in text
+    assert "name=" in text
+    # Grammar reminder is present so Claude knows how to format new tags.
+    assert "domain_tag" in text and "lowercase" in text
+
+
+def test_call_outbound_and_call_returned_logged(
+    fake_anthropic: MagicMock,
+    stub_field_map: StubFieldMap,
+    small_pdf: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Regression for Bug 6: every Anthropic round-trip must emit
+    ``claude.call_outbound`` BEFORE ``messages.create`` and
+    ``claude.call_returned`` AFTER. Together they let a future diagnostic
+    pass verify the call was a real API round-trip (vs a synthetic
+    response from the SDK or a mock).
+    """
+    fake_anthropic.messages.create.return_value = FakeMessage(
+        tool_uses=[
+            make_tool_use(domain_tag="account.named_insured", value="X", confidence=0.95)
+        ],
+    )
+    with caplog.at_level(logging.INFO, logger="iga.claude"):
+        extract_from_pdf(
+            small_pdf,
+            stub_field_map,
+            glossary="g",
+            system_prompt="s",
+            run_id="run-diag",
+        )
+    info_lines = [r.getMessage() for r in caplog.records if r.levelno == logging.INFO]
+    outbound = [m for m in info_lines if "claude.call_outbound" in m]
+    returned = [m for m in info_lines if "claude.call_returned" in m]
+    assert len(outbound) == 1, info_lines
+    assert len(returned) == 1, info_lines
+    # Outbound log carries model + last-4 of the API key.
+    assert "model=" in outbound[0]
+    assert "api_key_fingerprint=" in outbound[0]
+    # Returned log carries the response_id that Anthropic stamps on every
+    # real Message — if it's missing on a real call we know something
+    # synthetic is happening.
+    assert "response_id=" in returned[0]
+    assert "stop_reason=" in returned[0]
+
+
+def test_serialize_field_map_handles_empty_enum_with_grammar_reminder(
+    stub_field_map: StubFieldMap,
+) -> None:
+    """When the enum is empty (bootstrap state), the block should still
+    include the grammar reminder so Claude knows the target format."""
+    empty_fm = StubFieldMap()  # no domain_tags at all
+    text = claude_client._serialize_field_map_for_prompt(empty_fm)
+    assert "lowercase" in text
+    assert "domain_tag" in text
+    # The empty placeholder is still emitted.
+    assert "free-text domain_tag" in text
+
+
 def test_unknown_tool_name_warned_and_skipped(
     fake_anthropic: MagicMock,
     stub_field_map: StubFieldMap,

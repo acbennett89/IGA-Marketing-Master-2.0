@@ -142,9 +142,16 @@ class ExtractedField:
 class FieldMap(Protocol):
     """Structural protocol for FieldMap.
 
-    The real implementation lives in ``field_map.py`` and is not yet
-    available; this Protocol defines the surface ``claude_client`` requires
-    so the module can be loaded and tested independently.
+    The real implementation lives in ``field_map.py``; this Protocol
+    defines the surface ``claude_client`` requires so the module can be
+    loaded and tested independently.
+
+    Any duck-typed stand-in (test fakes, future alternative backends) must
+    expose ``generate_domain_tag_enum`` and ``lookup_by_domain_tag``. The
+    optional ``raw`` mapping (top-level JSON dict keyed by screen label) is
+    consulted by :func:`_serialize_field_map_for_prompt` when present so
+    Claude sees the live screen/field universe; absent it, only the enum
+    falls through.
     """
 
     def generate_domain_tag_enum(self) -> list[str]: ...
@@ -233,34 +240,175 @@ def _safe_generate_domain_tag_enum(field_map: FieldMap) -> list[str]:
 # ----- Field Map prompt block ------------------------------------------------
 
 
+_GRAMMAR_REMINDER: str = (
+    "When recording an extracted field, set `domain_tag` to a dot-separated "
+    "lowercase identifier matching this map (e.g., `submission.name`, "
+    "`account.named_insured`, `policy.gl.aggregate_limit`, `vehicle.vin`). "
+    "If you encounter a concept not in this map, propose a new tag using "
+    "the same grammar — the human will confirm or rename it."
+)
+
+
 def _serialize_field_map_for_prompt(field_map: FieldMap) -> str:
     """Render the Field Map as a stable text block for the second cache breakpoint.
 
-    The block is the JSON-encoded enum plus any ``notes_for_claude``
-    interpolations the Field Map exposes. We use the enum as the canonical
-    representation because it is what the tool schema enforces; the full
-    field-by-field hint set (including ``notes_for_claude`` strings) is
-    appended when the FieldMap exposes it via ``field_map_mod`` helpers.
+    Strategy:
+      1. Header + grammar reminder.
+      2. Sorted ``domain_tag`` enum (canonical tags currently in the map).
+      3. A walk of the live ``raw`` JSON: every screen, with every leaf
+         field's label, name, type, hint, enum_values, notes_for_claude.
+      4. Aggregated ``notes_for_claude`` block (legacy view).
+
+    The block is deterministic across runs (sorted screen labels, sorted
+    field keys) so prompt caching keys remain stable. If the FieldMap
+    duck-typed object doesn't expose ``raw`` (test stubs), only sections
+    1, 2, and 4 are emitted.
     """
     enum_values = _safe_generate_domain_tag_enum(field_map)
+
     parts: list[str] = []
+    parts.append("=== FIELD MAP — grammar reminder ===")
+    parts.append(_GRAMMAR_REMINDER)
+    parts.append("")
     parts.append("=== FIELD MAP — domain_tag enum (sorted) ===")
     if enum_values:
-        # One per line for caching stability across small enum changes.
         parts.extend(enum_values)
     else:
         parts.append("(empty — free-text domain_tag accepted; JIT enrichment will follow)")
 
-    # Optional: pull notes_for_claude when the field_map module exposes a
-    # public traversal helper. This keeps claude_client decoupled — if the
-    # helper isn't present, we just skip the notes block.
+    # Walk the on-disk Field Map for the screen/field universe. This is the
+    # single most important block for first-call extraction quality:
+    # without it, Claude has no idea what fields EPIC actually contains.
+    raw = getattr(field_map, "raw", None)
+    if isinstance(raw, dict) and raw:
+        parts.append("")
+        parts.append("=== FIELD MAP — screens and fields (EPIC universe) ===")
+        for screen_label in sorted(raw.keys()):
+            screen_obj = raw[screen_label]
+            if not isinstance(screen_obj, dict):
+                continue
+            screen_lines = _render_screen(screen_label, screen_obj)
+            if screen_lines:
+                parts.extend(screen_lines)
+                parts.append("")
+
     notes_block = _collect_notes_for_claude(field_map)
     if notes_block:
-        parts.append("")
         parts.append("=== FIELD MAP — notes_for_claude ===")
         parts.append(notes_block)
 
     return "\n".join(parts)
+
+
+def _render_screen(screen_label: str, screen_obj: Mapping[str, Any]) -> list[str]:
+    """Render a single screen (incl. its tabs and sub_tabs) as text lines."""
+    screen_code = screen_obj.get("screen_code")
+    header = (
+        f"## Screen: {screen_label}"
+        + (f" (screen_code={screen_code})" if isinstance(screen_code, str) else "")
+    )
+    lines: list[str] = [header]
+
+    field_lines = _render_field_list(screen_obj.get("fields") or [])
+    if field_lines:
+        lines.extend(field_lines)
+
+    tabs = screen_obj.get("tabs") or []
+    if isinstance(tabs, list):
+        for tab in tabs:
+            if not isinstance(tab, dict):
+                continue
+            tab_label = tab.get("label") or "<unnamed-tab>"
+            tab_field_lines = _render_field_list(tab.get("fields") or [])
+            if tab_field_lines:
+                lines.append(f"  Tab: {tab_label}")
+                lines.extend(_indent_lines(tab_field_lines, 2))
+            sub_tabs = tab.get("sub_tabs") or []
+            if isinstance(sub_tabs, list):
+                for sub_tab in sub_tabs:
+                    if not isinstance(sub_tab, dict):
+                        continue
+                    sub_label = sub_tab.get("label") or "<unnamed-sub_tab>"
+                    sub_field_lines = _render_field_list(sub_tab.get("fields") or [])
+                    if sub_field_lines:
+                        lines.append(f"    Sub-tab: {sub_label}")
+                        lines.extend(_indent_lines(sub_field_lines, 4))
+
+    sub_tabs = screen_obj.get("sub_tabs") or []
+    if isinstance(sub_tabs, list):
+        for sub_tab in sub_tabs:
+            if not isinstance(sub_tab, dict):
+                continue
+            sub_label = sub_tab.get("label") or "<unnamed-sub_tab>"
+            sub_field_lines = _render_field_list(sub_tab.get("fields") or [])
+            if sub_field_lines:
+                lines.append(f"  Sub-tab: {sub_label}")
+                lines.extend(_indent_lines(sub_field_lines, 2))
+
+    # Skip a screen entirely when we have nothing useful to say about it.
+    if len(lines) <= 1:
+        return []
+    return lines
+
+
+def _render_field_list(raw_fields: Any) -> list[str]:
+    """Render one container's ``fields[]`` list as deterministic text lines."""
+    if not isinstance(raw_fields, list):
+        return []
+    rendered: list[str] = []
+    for raw_field in raw_fields:
+        if not isinstance(raw_field, dict):
+            continue
+        line = _render_field(raw_field)
+        if line is not None:
+            rendered.append(line)
+    rendered.sort()
+    return rendered
+
+
+def _render_field(raw_field: Mapping[str, Any]) -> str | None:
+    """Render one leaf field's descriptive content as a single line.
+
+    Returns None when the field has no useful descriptive content (no
+    label, no hint, no domain_tag, no notes). The Field Map JSON does
+    contain a few placeholder entries; we drop them silently so Claude's
+    context window isn't burned on noise.
+    """
+    label = raw_field.get("label")
+    name = raw_field.get("name")
+    field_type = raw_field.get("type")
+    hint = raw_field.get("hint")
+    domain_tag = raw_field.get("domain_tag")
+    notes = raw_field.get("notes_for_claude")
+    enum_values = raw_field.get("enum_values")
+
+    if not any([label, name, hint, domain_tag, notes]):
+        return None
+
+    pieces: list[str] = []
+    if isinstance(label, str) and label:
+        pieces.append(f"label={label!r}")
+    if isinstance(name, str) and name:
+        pieces.append(f"name={name!r}")
+    if isinstance(field_type, str) and field_type:
+        pieces.append(f"type={field_type}")
+    if isinstance(domain_tag, str) and domain_tag:
+        pieces.append(f"domain_tag={domain_tag}")
+    if isinstance(hint, str) and hint:
+        pieces.append(f"hint={hint!r}")
+    if isinstance(enum_values, list) and enum_values:
+        # Cap at 12 to keep individual lines from blowing up the prompt.
+        sample = [str(v) for v in enum_values[:12]]
+        suffix = "" if len(enum_values) <= 12 else f" (+{len(enum_values) - 12} more)"
+        pieces.append(f"enum=[{', '.join(sample)}]{suffix}")
+    if isinstance(notes, str) and notes:
+        pieces.append(f"notes={notes!r}")
+    return "- " + "; ".join(pieces)
+
+
+def _indent_lines(lines: list[str], spaces: int) -> list[str]:
+    pad = " " * spaces
+    return [f"{pad}{line}" for line in lines]
 
 
 def _collect_notes_for_claude(field_map: FieldMap) -> str:
@@ -542,9 +690,23 @@ def _resolve_client(api_key: str | None) -> anthropic.Anthropic:
             "No Anthropic API key found. Set ANTHROPIC_API_KEY env var or "
             "store via secret_store.set_anthropic_api_key()."
         )
+    # Stash a fingerprint (last 4 chars) on the client so the round-trip
+    # logger can record which key actually went out without exposing it.
+    client = anthropic.Anthropic(api_key=key)
+    try:
+        # Defensive: client may be a MagicMock under tests; setattr is safe.
+        client._iga_key_fingerprint = key[-4:] if len(key) >= 4 else "????"
+    except Exception:  # pragma: no cover - defensive
+        pass
     # SDK reads ANTHROPIC_API_KEY from env if api_key is None; we pass
     # explicitly so we honor the secret_store value.
-    return anthropic.Anthropic(api_key=key)
+    return client
+
+
+def _api_key_fingerprint(client: Any) -> str:
+    """Return the last-4 fingerprint stashed on the client, or '????'."""
+    fp = getattr(client, "_iga_key_fingerprint", None)
+    return fp if isinstance(fp, str) else "????"
 
 
 def _classify_anthropic_error(exc: BaseException) -> ClaudeError:
@@ -582,10 +744,21 @@ def _create_message_with_retry(
     tests can monkeypatch it.
     """
     last_classified: ClaudeError | None = None
+    model_alias = request.get("model", "<unknown>")
+    fingerprint = _api_key_fingerprint(client)
     # Total attempts = 1 + len(backoffs). With (1,2,4,8) → 4 retries, 5 attempts.
     for attempt in range(len(backoffs) + 1):
+        # Outbound diagnostic log per ARCHITECTURE.md §6.5 + Amendment #17:
+        # the operator (and a future fix-pass) should be able to confirm a
+        # real Anthropic round-trip happened by reading the local app log.
+        logger.info(
+            "claude.call_outbound model=%s api_key_fingerprint=%s attempt=%d",
+            model_alias,
+            fingerprint,
+            attempt + 1,
+        )
         try:
-            return client.messages.create(**request)
+            response = client.messages.create(**request)
         except anthropic.AnthropicError as raw:
             classified = _classify_anthropic_error(raw)
             last_classified = classified
@@ -606,6 +779,17 @@ def _create_message_with_retry(
                 classified.__class__.__name__,
             )
             time.sleep(delay)
+            continue
+        # Inbound diagnostic log: pairs with claude.call_outbound to verify
+        # an actual Anthropic round-trip. Anthropic stamps `id` on the
+        # response; if it's missing or oddly formatted, the call wasn't real.
+        logger.info(
+            "claude.call_returned model=%s response_id=%s stop_reason=%s",
+            getattr(response, "model", model_alias),
+            getattr(response, "id", "<missing>"),
+            getattr(response, "stop_reason", "<missing>"),
+        )
+        return response
     # Defensive: loop should always either return or raise.
     raise last_classified or ClaudeError("messages.create exhausted retries")
 

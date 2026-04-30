@@ -481,6 +481,90 @@ def test_save_atomic_cleans_up_or_leaves_no_corrupt_canonical(
 # --------------------------------------------------------------------------- #
 
 
+# --------------------------------------------------------------------------- #
+# Instance-method surface (Bug 2 regression)
+# --------------------------------------------------------------------------- #
+
+
+def test_field_map_instance_generate_domain_tag_enum(loaded: FieldMap) -> None:
+    """Regression: ``claude_client._safe_generate_domain_tag_enum`` calls
+    ``field_map_instance.generate_domain_tag_enum()`` directly (not the
+    module-level helper). Before the fix this raised AttributeError and
+    silently returned [], so Claude saw no enum at all.
+    """
+    fm.update_field(
+        loaded,
+        screen_code="MKMMSDET",
+        name="streName",
+        patch={"domain_tag": "submission.name"},
+    )
+    fm.update_field(
+        loaded,
+        screen_code="MKMMSDET",
+        name="dteEffective",
+        patch={"domain_tag": "submission.effective_date"},
+    )
+    via_method = loaded.generate_domain_tag_enum()
+    via_module = fm.generate_domain_tag_enum(loaded)
+    assert via_method == via_module
+    assert via_method == [
+        "submission.effective_date",
+        "submission.name",
+    ]
+
+
+def test_field_map_instance_screens_touched_by_domain_tags(
+    loaded: FieldMap,
+) -> None:
+    """Companion regression: instance-method wrapper exists and matches
+    the module-level helper."""
+    fm.update_field(
+        loaded,
+        screen_code="MKMMSDET",
+        name="streName",
+        patch={"domain_tag": "submission.name"},
+    )
+    via_method = loaded.screens_touched_by_domain_tags(["submission.name"])
+    via_module = fm.screens_touched_by_domain_tags(loaded, ["submission.name"])
+    assert via_method == via_module == {"MKMMSDET"}
+
+
+def test_field_map_instance_lookup_methods(loaded: FieldMap) -> None:
+    """``lookup_by_domain_tag`` / ``lookup_by_name`` / ``fields_for_screen``
+    must all be reachable as bound methods to satisfy claude_client's
+    Protocol expectations."""
+    fm.update_field(
+        loaded,
+        screen_code="MKMMSDET",
+        name="streName",
+        patch={"domain_tag": "submission.name"},
+    )
+    by_tag = loaded.lookup_by_domain_tag("submission.name")
+    assert by_tag is not None and by_tag.name == "streName"
+
+    by_name = loaded.lookup_by_name("MKMMSDET", "streName")
+    assert by_name is not None and by_name.label == "Name"
+
+    screen_fields = loaded.fields_for_screen("MKMMSDET")
+    assert any(f.name == "streName" for f in screen_fields)
+
+
+def test_field_map_instance_iter_notes_for_claude(loaded: FieldMap) -> None:
+    """Instance helper that claude_client uses to render
+    ``notes_for_claude`` blocks."""
+    fm.update_field(
+        loaded,
+        screen_code="MKMMSDET",
+        name="streName",
+        patch={
+            "domain_tag": "submission.name",
+            "notes_for_claude": "Look for 'Submission' or 'Marketing Submission'.",
+        },
+    )
+    notes = loaded.iter_notes_for_claude()
+    assert ("submission.name", "Look for 'Submission' or 'Marketing Submission'.") in notes
+
+
 def test_no_version_key_in_allowed_patch_keys() -> None:
     """Path B / amendment #11: there is no `version` field on the Field Map."""
     assert "version" not in ALLOWED_PATCH_KEYS

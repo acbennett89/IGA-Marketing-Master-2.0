@@ -1,0 +1,192 @@
+INSURANCE GLOSSARY — terms, acronyms, and conventions you (Claude) will encounter in broker-supplied PDFs. Use this when disambiguating ACORD-form labels, EPIC vocabulary, and common LOB shorthand. Each entry below is a candidate label or value you may see in PDFs — match liberally to the canonical concept.
+
+================================================================================
+LINES OF BUSINESS (LOB)
+================================================================================
+
+GL / CGL — General Liability / Commercial General Liability. Protects against bodily injury and property damage claims arising from business operations. Look for "Each Occurrence", "Aggregate", "Products/Completed Ops", "Personal & Advertising Injury".
+
+BAP / CA — Business Auto Policy / Commercial Auto. Covers vehicles owned/leased/hired/non-owned by the business. Look for "Combined Single Limit (CSL)", "Bodily Injury", "Property Damage", "Uninsured/Underinsured Motorist (UM/UIM)", "Medical Payments", "Hired Auto", "Non-Owned Auto".
+
+WC / WORK COMP — Workers' Compensation. Required in most states for employee injuries. Look for "Each Accident", "Each Employee", "Policy Limit", "Class Code", "Premium Basis", "Estimated Annual Payroll", "Experience Mod / E-Mod / EMR".
+
+UMB / UMBRELLA — Umbrella / Excess Liability. Sits over GL/BAP/EL. Look for "Each Occurrence", "Aggregate", "Self-Insured Retention (SIR)", "Underlying Limits".
+
+PROPERTY / COMMERCIAL PROPERTY — Building, Business Personal Property (BPP), Business Income (BI). Look for "Building Limit", "Contents Limit", "BPP", "Business Income", "Coinsurance %", "Replacement Cost (RC)", "Actual Cash Value (ACV)", "Deductible".
+
+IM / INLAND MARINE — Movable property. Tools, equipment, contractors equipment, builders' risk. Look for "Scheduled", "Unscheduled", "Blanket Limit".
+
+BUILDERS RISK / BR — Course-of-construction property coverage.
+
+CYBER / CYBER LIABILITY — Network security, data breach, ransomware. Look for "First-Party", "Third-Party", "Privacy Liability", "Network Security", "Cyber Extortion".
+
+EBL / EPLI — Employee Benefits Liability / Employment Practices Liability. EPLI covers wrongful termination, harassment, discrimination claims. EBL covers errors in benefits administration.
+
+D&O / DIRECTORS & OFFICERS — Coverage for board/officer decisions.
+
+E&O / PROFESSIONAL — Errors & Omissions / Professional Liability. Look for "Claims-Made", "Retroactive Date", "Prior Acts".
+
+CRIME / FIDELITY — Employee theft, forgery, computer fraud.
+
+POLLUTION / EIL — Environmental Impairment Liability / Pollution Liability.
+
+COMMERCIAL PACKAGE / BOP — Business Owners Policy bundles GL + Property for small businesses. Treat each line separately when extracting.
+
+================================================================================
+PARTY ROLES
+================================================================================
+
+NAMED INSURED — the legal entity (or person) the policy is written for. Often listed as "First Named Insured" if multiple. Always extract this. EPIC field: account.named_insured.
+
+DBA / D/B/A — "doing business as". A trade name distinct from the legal entity. Often appears below the named insured.
+
+ADDITIONAL INSURED (AI) — third party added to the policy via endorsement (e.g., a landlord, a contractor's general contractor). Repeatable group: additional_insured.
+
+LOSS PAYEE / LIENHOLDER — entity entitled to claim payments (typically a lender on financed equipment/vehicles). Repeatable group: loss_payee.
+
+CERTIFICATE HOLDER — recipient of an ACORD 25/27/28. Often the same as an AI but not always.
+
+INSURER / CARRIER — the insurance company writing the policy.
+
+PRODUCER / AGENCY — the broker/agency. Look for "Producer:", "Agency:", "Broker:".
+
+UNDERWRITER — individual at the carrier responsible for the account.
+
+PRIOR CARRIER — the previous insurance company. Repeatable group: prior_carrier.
+
+================================================================================
+LIMITS, DEDUCTIBLES, AND PREMIUM TERMS
+================================================================================
+
+EACH OCCURRENCE / PER OCCURRENCE — the most the carrier pays for a single claim event.
+
+AGGREGATE / GENERAL AGGREGATE — the most the carrier pays in a policy term across all claims.
+
+PRODUCTS-COMPLETED OPERATIONS AGGREGATE — separate aggregate for products/completed-ops claims.
+
+PERSONAL & ADVERTISING INJURY (P&A) — non-bodily-injury torts: libel, slander, false arrest, etc.
+
+CSL / COMBINED SINGLE LIMIT — single limit covering both BI and PD on auto policies.
+
+SPLIT LIMIT — separate BI per person / BI per accident / PD per accident on auto policies (e.g., "100/300/100").
+
+DEDUCTIBLE — operator's out-of-pocket per claim.
+
+SIR / SELF-INSURED RETENTION — like a deductible but the insured handles the claim until the SIR is exhausted (umbrella convention).
+
+PREMIUM — what the insured pays. Annual unless otherwise noted.
+
+MINIMUM PREMIUM — the floor regardless of audit.
+
+DEPOSIT PREMIUM — initial premium subject to audit.
+
+EARNED / UNEARNED PREMIUM — pro-rata of premium based on policy term elapsed.
+
+PREMIUM BASIS — the exposure used to compute premium (payroll, sales/receipts, square footage, units, vehicles, etc.).
+
+CLASS CODE — NCCI/ISO classification for the operation. WC class codes are 4-digit (e.g., "8810" for clerical office). GL class codes are 5-digit ISO.
+
+EXPERIENCE MOD / E-MOD / EMR — Experience Modifier on WC policies (1.00 is industry average; lower is better).
+
+================================================================================
+DATES AND POLICY TERMS
+================================================================================
+
+EFFECTIVE DATE — when coverage starts. Often labeled "Effective" or "Eff Date" or "Policy Period From".
+
+EXPIRATION DATE — when coverage ends. Often "Exp Date" or "To" on a policy period range.
+
+POLICY PERIOD — the date range coverage is in force.
+
+RETROACTIVE DATE — earliest date a covered claim can have arisen (claims-made coverage).
+
+PRIOR ACTS COVERAGE — extends retro date back further than policy inception.
+
+EXTENDED REPORTING PERIOD (ERP) / TAIL — period after expiration during which late-reported claims are still covered (claims-made).
+
+================================================================================
+DOCUMENT TYPES YOU WILL SEE
+================================================================================
+
+DECLARATIONS PAGE / DEC PAGE — the cover sheet of a policy summarizing limits, premium, named insured, and policy period. The most data-dense document.
+
+ACORD 125 — Commercial Insurance Application (general info).
+
+ACORD 126 — Commercial General Liability section.
+
+ACORD 127 — Business Auto section.
+
+ACORD 130 — Workers' Compensation section.
+
+ACORD 140 — Property section.
+
+ACORD 25 / 27 / 28 — Certificates of Insurance (Liability / Property / Auto).
+
+LOSS RUN — claim history report from a prior carrier. Each row is a loss/claim. Repeatable group: loss.
+
+SUPPLEMENTAL APPLICATION — LOB-specific or industry-specific extra questions (e.g., "Roofing Supplemental", "Cyber Supplemental").
+
+SCHEDULE OF VEHICLES — list of covered autos with year/make/model/VIN/garaging.
+
+SCHEDULE OF DRIVERS — drivers with license number / DOB / years experience.
+
+SCHEDULE OF LOCATIONS — covered premises addresses.
+
+SCHEDULE OF HAZARDS — for GL, the operations and class codes.
+
+SOV / STATEMENT OF VALUES — building/contents values for property policies.
+
+================================================================================
+ABBREVIATIONS
+================================================================================
+
+NB — New Business (vs renewal)
+RN — Renewal
+CXL — Cancellation
+END — Endorsement
+CSL — Combined Single Limit
+BI — Bodily Injury
+PD — Property Damage
+P&A — Personal & Advertising Injury
+UM/UIM — Uninsured / Underinsured Motorist
+PIP — Personal Injury Protection
+MPC — Medical Payments Coverage
+GAS — Garage Operations Service (a coverage type)
+HNO — Hired & Non-Owned Auto
+AOI — Amount of Insurance
+TIV — Total Insured Value
+RCV — Replacement Cost Value
+ACV — Actual Cash Value
+COI — Certificate of Insurance
+COC — Certificate of Currency
+WOR — Waiver of Subrogation
+OCP — Owners and Contractors Protective
+TRIA / TRIPRA — Terrorism Risk Insurance Act / Reauthorization
+NAIC — National Association of Insurance Commissioners (carriers have NAIC codes)
+FEIN / EIN — Federal Employer Identification Number
+SSN — Social Security Number (rare on commercial; may appear on driver records)
+DOB — Date of Birth
+DBA — Doing Business As
+LLC / INC / LP / LLP — entity types
+NOC — Not Otherwise Classified
+
+================================================================================
+EPIC-SPECIFIC CONVENTIONS
+================================================================================
+
+The Field Map block above is keyed off Applied EPIC's actual screen and field names. EPIC field names start with prefixes like `stre`, `dte`, `cob`, `dde`, `dyn`, `ctl` — these are control prefixes (text/date/checkbox/dropdown/dynamic/control). When you see a label in EPIC's UI that matches a concept in the PDF, use the dotted `domain_tag` from the Field Map.
+
+EPIC MARKETING SUBMISSION (the screen this pipeline targets) tracks one renewal/new-business submission per record. Each submission carries lines (LOBs) and each line carries forms, endorsements, and exposures.
+
+================================================================================
+COMMON PDF QUIRKS
+================================================================================
+
+- Hand-written values on a typed form: extract verbatim, set needs_review=true.
+- A label appears but the value is in a separate column on the next page: extract with the label's page; note the cross-page issue in source_quote.
+- A field has multiple values across the document (e.g., named insured spelled differently in two places): extract both occurrences if they differ; the merge layer will surface a conflict.
+- Limits expressed as "$1,000,000 / $2,000,000": typically per-occurrence / aggregate; emit each as its own field.
+- Limits expressed as "100/300/100" on auto: BI per person / BI per accident / PD per accident, in thousands; emit each as its own field.
+- "Included" or "Incl" in a limit cell: the value is "included" — emit value="included" (string), confidence appropriate.
+- Premium with "Min" or "MP" suffix: minimum premium applies; capture and note in source_quote.
+- "TBD" / "TBA" / "Pending": value=null, needs_review=true, source_quote captures the placeholder.

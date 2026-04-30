@@ -485,13 +485,19 @@ def test_jit_unknown_tag_is_queued_not_written(
     assert merged_records[0].domain_tag == "account.named_insured"
 
 
-def test_malformed_tag_is_dropped_not_queued(
+def test_malformed_tag_is_recovered_as_jit_proposal(
     monkeypatch: pytest.MonkeyPatch,
     settings: config.Settings,
     fake_pdfs: list[Path],
 ) -> None:
-    """A malformed tag (uppercase, hyphens, no dot) is dropped, NOT
-    surfaced as a JIT proposal."""
+    """A malformed tag (uppercase, no dot) is recovered: rewritten into
+    valid grammar AND queued as a JIT proposal with ``reformatted_from``
+    set so the operator can confirm or rename in the GUI.
+
+    The ``malformed_tags_dropped`` counter still ticks (it's a diagnostic
+    counter for the bootstrap-state recovery rate), but the data is no
+    longer lost — it's surfaced for human review instead.
+    """
     fake_state = FakeState("Bobby")
     fake_fm = FakeFieldMap(["account.named_insured"])
 
@@ -530,9 +536,23 @@ def test_malformed_tag_is_dropped_not_queued(
 
     result = extract.run_extraction("Bobby", fake_pdfs, settings=settings)
 
+    # The recovery counter still bumps so diagnostics can show the
+    # bootstrap-state recovery rate.
     assert result.malformed_tags_dropped == 2
-    assert result.unknown_tags_queued == 0
+    # But the values are now queued as proposals instead of dropped.
+    assert result.unknown_tags_queued == 2
     assert result.fields_extracted == 1
+    # Proposals carry reformatted_from so the GUI knows to flag them.
+    reformatted = [p for p in result.pending_proposals if p.reformatted_from]
+    assert len(reformatted) == 2
+    assert {p.reformatted_from for p in reformatted} == {
+        "Submission Name",
+        "no_dot_at_all",
+    }
+    # Rewritten tags are valid dotted grammar.
+    for p in reformatted:
+        assert "." in p.proposed_tag
+        assert p.proposed_tag == p.proposed_tag.lower()
 
 
 def test_pending_extraction_block_persists_across_doc_loop(
@@ -828,6 +848,93 @@ def test_force_opus_propagates_to_claude_client(
     )
     assert fake_state.run_history[0].forced_opus is True
     assert result.per_doc[0].model_used == "opus-4-7"
+
+
+# --------------------------------------------------------------------------- #
+# Prompt-asset regressions (Bug 4)
+# --------------------------------------------------------------------------- #
+
+
+def test_default_system_prompt_clears_2048_token_cache_minimum() -> None:
+    """Regression for Bug 4: the system prompt must comfortably exceed
+    the 2,048-token Sonnet cache-prefix minimum so the first
+    cache_control breakpoint actually activates."""
+    approx_tokens = len(extract._DEFAULT_SYSTEM_PROMPT) // 4
+    assert approx_tokens > 2048, (
+        f"Default system prompt only ~{approx_tokens} tokens — Sonnet's "
+        f"cache threshold won't activate."
+    )
+    # Spot-check load-bearing content per the audit list.
+    assert "domain_tag" in extract._DEFAULT_SYSTEM_PROMPT
+    assert "needs_review" in extract._DEFAULT_SYSTEM_PROMPT
+    assert "source_quote" in extract._DEFAULT_SYSTEM_PROMPT
+    assert "confidence" in extract._DEFAULT_SYSTEM_PROMPT
+    assert "record_extracted_field" in extract._DEFAULT_SYSTEM_PROMPT
+
+
+def test_default_glossary_clears_2048_token_cache_minimum_combined() -> None:
+    """Combined system+glossary block must clear 2048 tokens.
+
+    The cache breakpoint covers BOTH text segments, so a meaty glossary
+    that complements a meaty system prompt is what actually crosses the
+    threshold in production. We assert the combined size like
+    claude_client does internally.
+    """
+    combined = (
+        extract._DEFAULT_SYSTEM_PROMPT
+        + "\n\n=== GLOSSARY ===\n"
+        + extract._DEFAULT_GLOSSARY
+    )
+    approx_tokens = len(combined) // 4
+    assert approx_tokens > 2048, (
+        f"system+glossary combined only ~{approx_tokens} tokens"
+    )
+    # LOB acronyms the audit calls out are present (case-insensitive
+    # because the glossary section headers are uppercase but body text
+    # mixed-case).
+    glossary_lower = extract._DEFAULT_GLOSSARY.lower()
+    for term in ("gl", "bap", "wc", "umbrella", "cyber", "additional insured"):
+        assert term in glossary_lower, f"missing term: {term}"
+
+
+# --------------------------------------------------------------------------- #
+# Test-isolation canary (Bug 1)
+# --------------------------------------------------------------------------- #
+
+
+def test_save_user_config_via_extract_settings_never_writes_localappdata(
+    monkeypatch: pytest.MonkeyPatch,
+    settings: config.Settings,
+    tmp_path: Path,
+) -> None:
+    """Regression for Bug 1: a test fixture that builds a Settings()
+    pointing user_config_dir at tmp_path must NEVER reach into the real
+    ``%LOCALAPPDATA%/IGA Marketing Master/`` when ``save_user_config`` is
+    invoked — the autouse conftest fixture monkeypatches platformdirs so
+    even a misconfigured Settings() can't escape.
+
+    Before the fix, a test that constructed Settings() without isolating
+    platformdirs would write the operator's real config.json with
+    ``working_library`` set to the test's tmp_path.
+    """
+    import os
+
+    config.save_user_config(settings)
+
+    # save_user_config wrote into tmp_path/config (the fixture's chosen
+    # user_config_dir), not into the real %LOCALAPPDATA%.
+    written = settings.user_config_dir / config.CONFIG_FILENAME
+    assert written.exists()
+    assert str(tmp_path) in str(written)
+
+    # Sanity-check: the real %LOCALAPPDATA%/IGA Marketing Master/config.json
+    # path was not touched by this test. We can't read it directly here
+    # (the conftest canary handles restoration), but we can verify our
+    # write target stayed under tmp_path.
+    real_localappdata = os.environ.get("LOCALAPPDATA")
+    if real_localappdata:
+        real_path = Path(real_localappdata) / "IGA Marketing Master"
+        assert str(real_path) not in str(written)
 
 
 def test_cache_stats_aggregate_across_docs(

@@ -75,19 +75,53 @@ _DOMAIN_TAG_PATTERN: re.Pattern[str] = re.compile(
     r"^[a-z][a-z0-9_]*(?:\.[a-z0-9_]+)+$"
 )
 
-# Default user prompts that feed the prompt cache. These are placeholders
-# the claude_client will be invoked with; they live here because the
-# orchestrator owns the run-level prompt assembly per ARCHITECTURE.md §6.3.
-_DEFAULT_GLOSSARY: str = (
-    "Insurance terms glossary. Used by Claude to disambiguate ACORD-form "
-    "conventions, common LOB shorthand, and EPIC's vocabulary."
+
+def _prompt_assets_dir() -> Path:
+    """Return the assets/prompts directory bundled with the source tree.
+
+    Resolves relative to this module's location so the lookup works whether
+    the package is installed editable or copied into a build artifact.
+    """
+    here = Path(__file__).resolve()
+    # extract.py -> iga_marketing_master_2 -> src -> repo root
+    return here.parent.parent.parent / "assets" / "prompts"
+
+
+def _load_prompt_asset(name: str, fallback: str) -> str:
+    """Read a packaged prompt asset, falling back to a short string on error.
+
+    The fallback exists so the module remains importable even if the assets
+    folder is missing — the runtime cache_breakpoint_undersized warning
+    will surface the real problem instead of an ImportError.
+    """
+    target = _prompt_assets_dir() / name
+    try:
+        return target.read_text(encoding="utf-8")
+    except OSError as exc:
+        _logger.warning(
+            "extract.prompt_asset_missing path=%s error=%s using_fallback=true",
+            target,
+            exc,
+        )
+        return fallback
+
+
+_DEFAULT_GLOSSARY: str = _load_prompt_asset(
+    "glossary.txt",
+    fallback=(
+        "Insurance terms glossary. Used by Claude to disambiguate ACORD-form "
+        "conventions, common LOB shorthand, and EPIC's vocabulary."
+    ),
 )
-_DEFAULT_SYSTEM_PROMPT: str = (
-    "You are an expert insurance-data extraction assistant. For every field "
-    "you can identify in the attached PDF, call the record_extracted_field "
-    "tool exactly once with a stable domain_tag, the literal source quote, "
-    "the page number, and your confidence (0.0-1.0). If a field is missing "
-    "or ambiguous, set needs_review=true and explain in source_quote."
+_DEFAULT_SYSTEM_PROMPT: str = _load_prompt_asset(
+    "system_prompt.txt",
+    fallback=(
+        "You are an expert insurance-data extraction assistant. For every field "
+        "you can identify in the attached PDF, call the record_extracted_field "
+        "tool exactly once with a stable domain_tag, the literal source quote, "
+        "the page number, and your confidence (0.0-1.0). If a field is missing "
+        "or ambiguous, set needs_review=true and explain in source_quote."
+    ),
 )
 
 
@@ -150,6 +184,12 @@ class DomainTagProposal:
     via `field_map.update_field`), edit (corrects the tag, then writes),
     or reject (drops the proposal). The extraction-agent never writes to
     the Field Map directly.
+
+    ``reformatted_from`` is set when the proposal was salvaged from a
+    grammatically-malformed Claude tag (e.g., flat snake_case
+    ``named_insured`` rebuilt as ``account.named_insured``). The GUI shows
+    this so the operator knows the proposal needs review even if the
+    rewritten tag looks fine.
     """
 
     proposed_tag: str
@@ -161,6 +201,7 @@ class DomainTagProposal:
     run_id: str
     repeatable_group: str | None = None
     repeatable_index: int | None = None
+    reformatted_from: str | None = None
 
 
 @dataclass(slots=True, kw_only=True)
@@ -232,6 +273,92 @@ def _is_well_formed_tag(tag: str) -> bool:
     return bool(_DOMAIN_TAG_PATTERN.match(tag))
 
 
+# Heuristic mapping from common flat snake_case tags Claude tends to emit
+# in bootstrap (no enum, no grammar) to dotted-grammar candidates the
+# operator is likely to confirm. The mapping is deliberately small and
+# conservative: it only handles the high-frequency flat tokens we saw in
+# the operator's first real run; anything not in the map gets a generic
+# ``proposed.<original>`` namespace so the operator can rename in the GUI.
+_FLAT_TAG_NAMESPACE_HINTS: dict[str, str] = {
+    "named_insured": "account",
+    "named_insured_address": "account",
+    "dba": "account",
+    "fein": "account",
+    "ein": "account",
+    "mailing_address": "account",
+    "agency_name": "agency",
+    "agency_address": "agency",
+    "agency_code": "agency",
+    "agency_phone": "agency",
+    "customer_number": "agency",
+    "insurer_name": "policy",
+    "insurer": "policy",
+    "carrier": "policy",
+    "carrier_name": "policy",
+    "policy_number": "policy",
+    "policy_form": "policy",
+    "policy_effective_date": "policy",
+    "policy_effective_time": "policy",
+    "policy_expiration_date": "policy",
+    "policy_expiration_time": "policy",
+    "total_premium": "policy",
+    "policy_premium": "policy",
+    "endorsement_description": "policy.endorsement",
+    "endorsement_form_number": "policy.endorsement",
+    "endorsement_premium": "policy.endorsement",
+    "vin": "vehicle",
+    "make": "vehicle",
+    "model": "vehicle",
+    "year": "vehicle",
+}
+
+
+def _reformat_malformed_tag(tag: str) -> str | None:
+    """Best-effort rewrite of a malformed Claude tag into dotted grammar.
+
+    Returns the rewritten tag (always grammar-valid) or None if the input
+    is unsalvageable (empty, non-string, or after cleaning still has no
+    a-z characters). The result is always a JIT proposal — the operator
+    confirms or renames in the GUI.
+    """
+    if not isinstance(tag, str):
+        return None
+    cleaned = tag.strip().lower()
+    if not cleaned:
+        return None
+    # Replace whitespace, hyphens, and other separators with underscores;
+    # drop anything that's not [a-z0-9_].
+    cleaned = re.sub(r"[\s\-]+", "_", cleaned)
+    cleaned = re.sub(r"[^a-z0-9_.]", "", cleaned)
+    cleaned = cleaned.strip(".")
+    if not cleaned:
+        return None
+    # Already dotted? Just guarantee shape.
+    if "." in cleaned:
+        # Collapse repeated dots and leading-digit segments.
+        parts = [p for p in cleaned.split(".") if p]
+        if not parts:
+            return None
+        # First segment must start with a letter.
+        if not parts[0] or not parts[0][0].isalpha():
+            parts[0] = "proposed_" + parts[0]
+        candidate = ".".join(parts)
+        if _DOMAIN_TAG_PATTERN.match(candidate):
+            return candidate
+        return f"proposed.{candidate.replace('.', '_')}"
+    # Flat tag: try the namespace hint table first.
+    namespace = _FLAT_TAG_NAMESPACE_HINTS.get(cleaned)
+    if namespace is not None:
+        candidate = f"{namespace}.{cleaned}"
+        if _DOMAIN_TAG_PATTERN.match(candidate):
+            return candidate
+    # Fallback: tuck under a "proposed" namespace so the operator can rename.
+    candidate = f"proposed.{cleaned}"
+    if _DOMAIN_TAG_PATTERN.match(candidate):
+        return candidate
+    return None
+
+
 def _check_duplicate_basenames(pdf_paths: list[Path]) -> None:
     """Raise DuplicatePdfBasenameError on within-run basename collisions."""
     seen: dict[str, list[Path]] = {}
@@ -271,11 +398,23 @@ def _split_records_by_known_tag(
     *,
     run_id: str,
     summary: DocSummary,
+    recover_malformed: bool = True,
 ) -> tuple[list[Any], list[DomainTagProposal]]:
     """Partition records into (known, proposals).
 
-    Drops records whose `domain_tag` violates §3.1 grammar with a logged
-    warning. Records with a well-formed but unknown tag become proposals.
+    Three classifications per ARCHITECTURE.md §3.1 + the post-mortem on
+    the bootstrap-state extraction:
+
+    1. Valid + tag in current Field Map enum  -> known, merged into state.
+    2. Valid grammar + not in current enum    -> JIT proposal.
+    3. Invalid grammar                         -> JIT proposal with the
+       reformatted candidate, ``reformatted_from`` set so the GUI can
+       prompt the operator to confirm / rename. The original raw tag is
+       still logged via ``extract.malformed_tag_reformatted``.
+
+    Setting ``recover_malformed=False`` falls back to the legacy "drop
+    malformed" behavior — used by tests that want to verify the dropped
+    counter still ticks.
     """
     known: list[Any] = []
     proposals: list[DomainTagProposal] = []
@@ -285,21 +424,49 @@ def _split_records_by_known_tag(
     enforce_enum = bool(known_tags)
     for r in records:
         tag = getattr(r, "domain_tag", None)
+        reformatted_from: str | None = None
         if not isinstance(tag, str) or not _is_well_formed_tag(tag):
-            # Malformed tags (uppercase, no namespace, weird chars) are
-            # dropped here rather than confused with a real proposal — we
-            # don't want to ask the operator to confirm a typo.
+            if not recover_malformed:
+                _logger.warning(
+                    "extract.malformed_tag_dropped run_id=%s doc=%s raw_tag=%r",
+                    run_id,
+                    summary.doc_id,
+                    tag,
+                )
+                summary.malformed_tags_dropped += 1
+                continue
+            # Recoverable: rewrite to dotted grammar and queue for human
+            # confirmation. We still bump the malformed counter so
+            # diagnostics can show the bootstrap-state recovery rate.
+            rewritten = _reformat_malformed_tag(tag) if isinstance(tag, str) else None
+            if rewritten is None:
+                _logger.warning(
+                    "extract.malformed_tag_dropped run_id=%s doc=%s raw_tag=%r reason=unsalvageable",
+                    run_id,
+                    summary.doc_id,
+                    tag,
+                )
+                summary.malformed_tags_dropped += 1
+                continue
             _logger.warning(
-                "extract.malformed_tag_dropped run_id=%s doc=%s raw_tag=%r",
+                "extract.malformed_tag_reformatted run_id=%s doc=%s raw_tag=%r rewritten=%s",
                 run_id,
                 summary.doc_id,
                 tag,
+                rewritten,
             )
             summary.malformed_tags_dropped += 1
-            continue
+            reformatted_from = tag if isinstance(tag, str) else repr(tag)
+            tag = rewritten
         if not enforce_enum or tag in known_tags:
-            known.append(r)
-            continue
+            if reformatted_from is None:
+                known.append(r)
+                continue
+            # A reformatted tag that happens to land on a known enum
+            # value still goes through proposal review — the operator
+            # should see the rewrite even if it's "right", because Claude
+            # broke the grammar contract and we don't trust the value
+            # blindly.
         proposals.append(
             DomainTagProposal(
                 proposed_tag=tag,
@@ -311,14 +478,16 @@ def _split_records_by_known_tag(
                 run_id=run_id,
                 repeatable_group=getattr(r, "repeatable_group", None),
                 repeatable_index=getattr(r, "repeatable_index", None),
+                reformatted_from=reformatted_from,
             )
         )
         _logger.info(
-            "extract.proposal_queued run_id=%s doc=%s proposed_tag=%s sample_value=%r",
+            "extract.proposal_queued run_id=%s doc=%s proposed_tag=%s sample_value=%r reformatted_from=%r",
             run_id,
             summary.doc_id,
             tag,
             getattr(r, "value", None),
+            reformatted_from,
         )
     return known, proposals
 
@@ -464,6 +633,7 @@ def _proposal_to_dict(p: DomainTagProposal) -> dict[str, Any]:
         "run_id": p.run_id,
         "repeatable_group": p.repeatable_group,
         "repeatable_index": p.repeatable_index,
+        "reformatted_from": p.reformatted_from,
     }
 
 

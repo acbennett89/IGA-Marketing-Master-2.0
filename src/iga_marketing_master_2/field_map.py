@@ -248,6 +248,48 @@ class FieldMap:
     _aliases: dict[str, str] = field(default_factory=dict)
     """Maps alias domain_tag -> primary domain_tag."""
 
+    # ---- Instance methods (thin wrappers over module-level helpers) ----
+    # claude_client.py and other callers use the FieldMap Protocol surface
+    # (see claude_client.FieldMap). Providing these as bound methods means
+    # `field_map_instance.generate_domain_tag_enum()` works without the
+    # caller having to import the module-level function.
+
+    def generate_domain_tag_enum(self) -> list[str]:
+        """Instance-method wrapper around :func:`generate_domain_tag_enum`."""
+        return generate_domain_tag_enum(self)
+
+    def lookup_by_domain_tag(self, domain_tag: str) -> "FieldEntry | None":
+        """Instance-method wrapper around :func:`lookup_by_domain_tag`."""
+        return lookup_by_domain_tag(self, domain_tag)
+
+    def lookup_by_name(self, screen_code: str, name: str) -> "FieldEntry | None":
+        """Instance-method wrapper around :func:`lookup_by_name`."""
+        return lookup_by_name(self, screen_code, name)
+
+    def fields_for_screen(self, screen_code: str) -> list[FieldEntry]:
+        """Instance-method wrapper around :func:`fields_for_screen`."""
+        return fields_for_screen(self, screen_code)
+
+    def screens_touched_by_domain_tags(self, tags: list[str]) -> set[str]:
+        """Instance-method wrapper around :func:`screens_touched_by_domain_tags`."""
+        return screens_touched_by_domain_tags(self, tags)
+
+    def iter_notes_for_claude(self) -> "list[tuple[str, str]]":
+        """Yield (domain_tag, notes_for_claude) pairs for every tagged field
+        whose ``notes_for_claude`` is set.
+
+        Returns the canonical (primary) domain_tag for each entry. Used by
+        :mod:`claude_client` to render the optional ``notes_for_claude``
+        block at the end of the Field Map prompt.
+        """
+        out: list[tuple[str, str]] = []
+        for tag, entry in self._by_domain_tag.items():
+            note = entry.notes_for_claude
+            if isinstance(note, str) and note.strip():
+                out.append((tag, note))
+        out.sort(key=lambda pair: pair[0])
+        return out
+
 
 # --------------------------------------------------------------------------- #
 # Public API
