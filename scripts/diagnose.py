@@ -31,6 +31,7 @@ Flags:
 from __future__ import annotations
 
 import argparse
+import shutil
 import sys
 import time
 from dataclasses import replace
@@ -202,6 +203,7 @@ def run_real_extraction(
     client_name: str,
     single: bool,
     force_opus: bool,
+    fresh: bool,
 ) -> int:
     if not pdfs:
         print(f"\n  No PDFs found in {DIAGNOSTIC_INPUTS}.")
@@ -209,6 +211,23 @@ def run_real_extraction(
         return 1
     if single:
         pdfs = pdfs[:1]
+
+    client_path = settings.working_library / client_name
+
+    # --fresh: wipe the entire diagnostic client folder for a clean slate.
+    if fresh and client_path.exists():
+        shutil.rmtree(client_path, ignore_errors=True)
+        print(f"\n  --fresh: wiped {client_path}")
+
+    # Always clear any stale pending_extraction block before a diagnostic run.
+    # The "resume or discard?" prompt is the right safety net for production
+    # but pure friction for diagnostic iteration. resume_extraction_clear is
+    # a no-op when there's no pending block.
+    if client_path.exists():
+        try:
+            extract.resume_extraction_clear(client_path)
+        except Exception as exc:  # pragma: no cover - defensive
+            print(f"\n  WARNING: resume_extraction_clear raised {exc!r}; continuing")
 
     _section(f"Extracting {len(pdfs)} PDF(s) for client '{client_name}'")
     for p in pdfs:
@@ -280,6 +299,8 @@ def main() -> int:
         help="Extract only the first PDF (cheap iteration).")
     parser.add_argument("--force-opus", action="store_true",
         help="Use Opus 4.7 on every call (more expensive).")
+    parser.add_argument("--fresh", action="store_true",
+        help="Wipe the diagnostic client folder before running (full clean slate).")
     parser.add_argument("--client", default=DIAGNOSTIC_CLIENT,
         help=f"Client folder name (default: {DIAGNOSTIC_CLIENT}).")
     parser.add_argument("--working-library", type=Path, default=None,
@@ -326,6 +347,7 @@ def main() -> int:
         client_name=args.client,
         single=args.single,
         force_opus=args.force_opus,
+        fresh=args.fresh,
     )
 
 
