@@ -1488,21 +1488,350 @@ def test_extract_from_pdf_includes_opus_escalation_in_usage_total(
 
 
 # ============================================================================
-# Bug 8 regression — tool description & system prompt instruct parallel calls
+# Bug 8 / fix-pass-3 — tool description matches iterative tool-use loop
 # ============================================================================
 
 
-def test_tool_description_explicitly_requests_parallel_tool_use(
+def test_tool_description_describes_iterative_tool_use_loop(
     stub_field_map: StubFieldMap,
 ) -> None:
-    """Bug 8 fix: the tool description must tell Claude to emit MANY
-    parallel tool_use calls in a single response, not one and stop."""
+    """fix-pass-3: the tool description must tell Claude that this is a
+    multi-turn tool-use loop where each call records ONE field and the
+    system replies before Claude continues. The previous "parallel /
+    many calls in one response" wording was wrong because Sonnet 4.6
+    gates itself to one tool_use per response anyway."""
     schema = build_record_field_tool_schema(stub_field_map)
     desc = schema["description"]
-    # Lowercase comparison to keep the assertion resilient to minor
-    # rewording — the SEMANTIC requirement is "parallel, many per response".
     desc_lower = desc.lower()
-    assert "parallel" in desc_lower
-    assert "many" in desc_lower
-    # Explicit anti-pattern callout: don't stop after one.
-    assert "do not stop" in desc_lower or "continue" in desc_lower
+    # SEMANTIC requirement: iterative loop where each call records one field.
+    assert "one" in desc_lower
+    assert "multi-turn" in desc_lower or "loop" in desc_lower
+    # Continue-until-done callout.
+    assert "continue" in desc_lower or "until" in desc_lower
+    # Repeatable-group note retained.
+    assert "repeatable" in desc_lower
+
+
+# ============================================================================
+# fix-pass-3 — Anthropic agentic tool-use loop in _extract_one_chunk
+# ============================================================================
+
+
+class FakeToolUseBlockWithId(FakeToolUseBlock):
+    """FakeToolUseBlock with an ``id`` so the tool_use loop can build a
+    matching ``tool_result`` block."""
+
+    _id_counter: int = 0
+
+    def __init__(self, name: str, input_payload: dict[str, Any]) -> None:
+        super().__init__(name, input_payload)
+        FakeToolUseBlockWithId._id_counter += 1
+        self.id = f"toolu_test_{FakeToolUseBlockWithId._id_counter:04d}"
+
+
+def make_tool_use_with_id(
+    *,
+    domain_tag: str,
+    value: Any,
+    confidence: float,
+    source_doc: str = "x.pdf",
+    source_page: int = 1,
+    source_quote: str = "...",
+    needs_review: bool = False,
+    repeatable_group: str | None = None,
+    repeatable_index: int | None = None,
+) -> FakeToolUseBlockWithId:
+    payload: dict[str, Any] = {
+        "domain_tag": domain_tag,
+        "value": value,
+        "source_doc": source_doc,
+        "source_page": source_page,
+        "source_quote": source_quote,
+        "confidence": confidence,
+    }
+    if needs_review:
+        payload["needs_review"] = True
+    if repeatable_group is not None:
+        payload["repeatable_group"] = repeatable_group
+    if repeatable_index is not None:
+        payload["repeatable_index"] = repeatable_index
+    return FakeToolUseBlockWithId("record_extracted_field", payload)
+
+
+def test_tool_use_loop_iterates_until_end_turn(
+    fake_anthropic: MagicMock,
+    stub_field_map: StubFieldMap,
+    small_pdf: Path,
+) -> None:
+    """fix-pass-3: when Sonnet emits one tool_use + stop_reason=tool_use
+    on each of N-1 turns and finally end_turn on turn N, the loop must
+    return N tool_use records and terminate cleanly."""
+    responses = [
+        FakeMessage(
+            tool_uses=[
+                make_tool_use_with_id(
+                    domain_tag=f"account.field_{i}", value=f"v{i}", confidence=0.95
+                )
+            ],
+            stop_reason="tool_use",
+            usage=FakeUsage(input_tokens=100, output_tokens=20),
+        )
+        for i in range(4)
+    ]
+    # Final turn — end_turn with no tool_use.
+    responses.append(
+        FakeMessage(
+            tool_uses=[],
+            stop_reason="end_turn",
+            usage=FakeUsage(input_tokens=80, output_tokens=10),
+        )
+    )
+    fake_anthropic.messages.create.side_effect = responses
+
+    result = extract_from_pdf(
+        small_pdf,
+        stub_field_map,
+        glossary="g",
+        system_prompt="s",
+        run_id="run-loop-iter",
+    )
+    # 4 tool_use turns + 1 final end_turn = 5 messages.create calls.
+    assert fake_anthropic.messages.create.call_count == 5
+    assert len(result) == 4
+    assert {r.domain_tag for r in result} == {
+        "account.field_0",
+        "account.field_1",
+        "account.field_2",
+        "account.field_3",
+    }
+    # All tagged Sonnet (no escalation since all confidence=0.95).
+    for r in result:
+        assert r.model_used == DEFAULT_SONNET_MODEL
+
+
+def test_tool_use_loop_parallel_emission_still_works(
+    fake_anthropic: MagicMock,
+    stub_field_map: StubFieldMap,
+    small_pdf: Path,
+) -> None:
+    """fix-pass-3: if Claude DOES emit multiple tool_use blocks in one
+    response with stop_reason=end_turn (the documented capability), the
+    loop should record all of them in a single turn."""
+    fake_anthropic.messages.create.return_value = FakeMessage(
+        tool_uses=[
+            make_tool_use_with_id(
+                domain_tag=f"account.field_{i}", value=f"v{i}", confidence=0.95
+            )
+            for i in range(5)
+        ],
+        stop_reason="end_turn",
+    )
+    result = extract_from_pdf(
+        small_pdf,
+        stub_field_map,
+        glossary="g",
+        system_prompt="s",
+        run_id="run-loop-parallel",
+    )
+    # Exactly one API call — Claude emitted everything in turn 1.
+    assert fake_anthropic.messages.create.call_count == 1
+    assert len(result) == 5
+
+
+def test_tool_use_loop_caps_at_max_turns(
+    fake_anthropic: MagicMock,
+    stub_field_map: StubFieldMap,
+    small_pdf: Path,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """fix-pass-3: if Claude refuses to ever stop (returns tool_use on
+    every turn), the loop must terminate at MAX_TOOL_USE_TURNS, log a
+    warning, and return the records gathered so far."""
+    # Pin a small cap so the test runs quickly.
+    monkeypatch.setattr(claude_client, "MAX_TOOL_USE_TURNS", 5)
+
+    fake_anthropic.messages.create.side_effect = [
+        FakeMessage(
+            tool_uses=[
+                make_tool_use_with_id(
+                    domain_tag=f"account.field_{i}", value="v", confidence=0.95
+                )
+            ],
+            stop_reason="tool_use",
+        )
+        for i in range(20)
+    ]
+
+    with caplog.at_level(logging.WARNING, logger="iga.claude"):
+        result = extract_from_pdf(
+            small_pdf,
+            stub_field_map,
+            glossary="g",
+            system_prompt="s",
+            run_id="run-loop-cap",
+        )
+
+    # Exactly MAX_TOOL_USE_TURNS calls; we stop instead of running away.
+    assert fake_anthropic.messages.create.call_count == 5
+    # Each turn appended its (single) record.
+    assert len(result) == 5
+    cap_warnings = [
+        r for r in caplog.records if "tool_loop_max_turns_reached" in r.getMessage()
+    ]
+    assert len(cap_warnings) == 1
+
+
+def test_tool_use_loop_sums_usage_across_turns(
+    fake_anthropic: MagicMock,
+    stub_field_map: StubFieldMap,
+    small_pdf: Path,
+) -> None:
+    """fix-pass-3: per-turn usage must be summed into a single
+    ``_CallUsage`` so the operator-visible aggregate covers every API
+    call the loop made (cached + uncached)."""
+    responses = [
+        FakeMessage(
+            tool_uses=[
+                make_tool_use_with_id(
+                    domain_tag=f"account.field_{i}", value=f"v{i}", confidence=0.95
+                )
+            ],
+            stop_reason="tool_use",
+            usage=FakeUsage(
+                input_tokens=1_000,
+                output_tokens=150,
+                cache_creation_input_tokens=20_000 if i == 0 else 0,
+                cache_read_input_tokens=0 if i == 0 else 19_000,
+            ),
+        )
+        for i in range(3)
+    ]
+    responses.append(
+        FakeMessage(
+            tool_uses=[],
+            stop_reason="end_turn",
+            usage=FakeUsage(
+                input_tokens=500,
+                output_tokens=20,
+                cache_creation_input_tokens=0,
+                cache_read_input_tokens=19_000,
+            ),
+        )
+    )
+    fake_anthropic.messages.create.side_effect = responses
+
+    result = extract_from_pdf(
+        small_pdf,
+        stub_field_map,
+        glossary="g",
+        system_prompt="s",
+        run_id="run-loop-usage",
+    )
+    usage = getattr(result, "cache_usage", None)
+    assert usage is not None
+    # 4 turns total.
+    assert usage.api_calls == 4
+    # 1000 * 3 + 500 = 3500
+    assert usage.input_tokens == 3_500
+    # 150 * 3 + 20 = 470
+    assert usage.output_tokens == 470
+    # 20_000 only on turn 0
+    assert usage.cache_creation_input_tokens == 20_000
+    # 19_000 on turns 1, 2, 3 = 57_000
+    assert usage.cache_read_input_tokens == 57_000
+
+
+def test_tool_use_loop_appends_assistant_and_tool_result_messages(
+    fake_anthropic: MagicMock,
+    stub_field_map: StubFieldMap,
+    small_pdf: Path,
+) -> None:
+    """fix-pass-3: between turns the loop must append:
+       (a) the assistant Message we received, and
+       (b) a user Message of tool_result blocks (one per tool_use,
+           content="recorded", tool_use_id matches the originating block).
+    Verified by inspecting the kwargs of the SECOND messages.create call.
+    """
+    turn1 = FakeMessage(
+        tool_uses=[
+            make_tool_use_with_id(
+                domain_tag="account.named_insured", value="Acme", confidence=0.95
+            )
+        ],
+        stop_reason="tool_use",
+    )
+    turn2 = FakeMessage(tool_uses=[], stop_reason="end_turn")
+    fake_anthropic.messages.create.side_effect = [turn1, turn2]
+
+    extract_from_pdf(
+        small_pdf,
+        stub_field_map,
+        glossary="g",
+        system_prompt="s",
+        run_id="run-loop-followup",
+    )
+
+    assert fake_anthropic.messages.create.call_count == 2
+    second_kwargs = fake_anthropic.messages.create.call_args_list[1].kwargs
+    messages = second_kwargs["messages"]
+    # Original user message (PDF + instruction) + assistant turn 1 + user tool_results.
+    assert len(messages) == 3
+    assert messages[0]["role"] == "user"  # initial PDF/instruction message
+    assert messages[1]["role"] == "assistant"
+    # Assistant content == the original tool_use blocks we received.
+    assert messages[1]["content"] == list(turn1.content)
+
+    # User turn carries one tool_result per tool_use we just processed.
+    follow_up_user = messages[2]
+    assert follow_up_user["role"] == "user"
+    tool_results = follow_up_user["content"]
+    assert len(tool_results) == 1
+    tr = tool_results[0]
+    assert tr["type"] == "tool_result"
+    assert tr["content"] == "recorded"
+    # ID matches the originating tool_use.
+    assert tr["tool_use_id"] == turn1.content[0].id
+
+
+def test_tool_use_loop_finished_log_emitted(
+    fake_anthropic: MagicMock,
+    stub_field_map: StubFieldMap,
+    small_pdf: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The loop must emit a single ``claude.tool_loop_finished`` summary
+    line per chunk, with the turn count and final stop_reason."""
+    fake_anthropic.messages.create.return_value = FakeMessage(
+        tool_uses=[
+            make_tool_use_with_id(
+                domain_tag="account.named_insured", value="X", confidence=0.95
+            )
+        ],
+        stop_reason="end_turn",
+    )
+
+    with caplog.at_level(logging.INFO, logger="iga.claude"):
+        extract_from_pdf(
+            small_pdf,
+            stub_field_map,
+            glossary="g",
+            system_prompt="s",
+            run_id="run-loop-summary",
+        )
+
+    summary = [
+        r for r in caplog.records if "tool_loop_finished" in r.getMessage()
+    ]
+    assert len(summary) == 1
+    msg = summary[0].getMessage()
+    assert "turns=1" in msg
+    assert "total_tool_calls=1" in msg
+    assert "stop_reason=end_turn" in msg
+
+
+def test_max_tool_use_turns_constant_exposed() -> None:
+    """fix-pass-3: ``MAX_TOOL_USE_TURNS`` must be a module-level constant
+    so future operators / tests can override it."""
+    assert hasattr(claude_client, "MAX_TOOL_USE_TURNS")
+    assert claude_client.MAX_TOOL_USE_TURNS == 60

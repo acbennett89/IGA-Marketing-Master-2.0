@@ -77,6 +77,15 @@ DEFAULT_OPUS_MODEL: str = "claude-opus-4-7"
 RETRY_BACKOFF_SECONDS: tuple[int, ...] = (1, 2, 4, 8)
 MAX_TOKENS_PER_CALL: int = 16_384
 
+# Anthropic agentic-loop hard cap. Sonnet 4.6 prefers the documented
+# multi-turn tool-use pattern: emit ONE tool_use, receive ONE tool_result,
+# then continue. ``MAX_TOOL_USE_TURNS`` bounds the loop so a malformed
+# prompt (e.g., Claude refusing to ever stop) can't run away. Per
+# fix-pass-3: 60 turns is plenty for a 20-60-field dec page; the
+# conversation grows by ~300 tokens per turn so 60 turns adds ~18K
+# uncached tokens — acceptable.
+MAX_TOOL_USE_TURNS: int = 60
+
 # Sonnet 4.6 cache breakpoint minimum (RESEARCH.md Finding 5)
 SONNET_CACHE_MIN_TOKENS: int = 2_048
 
@@ -247,14 +256,14 @@ def build_record_field_tool_schema(field_map: FieldMap) -> dict[str, Any]:
     return {
         "name": "record_extracted_field",
         "description": (
-            "Record ONE extracted insurance field per call. A typical insurance "
-            "dec page or schedule contains 20-60 distinct fields. You should emit "
-            "MANY parallel tool_use calls in a single response — one for EACH "
-            "field you find. Do not stop after recording a single field. Continue "
-            "emitting record_extracted_field tool calls until every extractable "
-            "field in the document has been recorded. Repeatable items (vehicles, "
-            "drivers, locations, loss payees) get one call per item with "
-            "repeatable_group + repeatable_index set."
+            "Record ONE extracted insurance field, keyed by its domain_tag. "
+            "You are in a multi-turn tool-use loop: each call records one "
+            "field, after which you may immediately make another call for the "
+            "next field. Continue until every extractable field in the document "
+            "is recorded, then end your turn. A typical dec page has 20-60 "
+            "fields. Repeatable items (vehicles, drivers, locations, loss "
+            "payees) get one call per item with repeatable_group + "
+            "repeatable_index set."
         ),
         "input_schema": {
             "type": "object",
@@ -1095,12 +1104,35 @@ def _extract_one_chunk(
     user_instruction: str,
     cache_miss_reason_hint: str | None = None,
 ) -> tuple[list[ExtractedField], _CallUsage]:
-    """Run extraction on a single chunk; handle retries, cache logging, debug.
+    """Run extraction on a single chunk via the Anthropic multi-turn tool-use loop.
 
-    Returns the parsed records together with a :class:`_CallUsage` block
-    so the caller can sum cache + token usage across chunks (Bug 7 fix).
+    Per Anthropic's tool-use docs (and confirmed empirically with Sonnet
+    4.6 in fix-pass-3 diagnostics), Claude prefers an iterative pattern:
+    emit ONE ``record_extracted_field`` tool_use, receive a ``tool_result``
+    of ``"recorded"``, then continue with the NEXT field on the next turn.
+    A single response with many parallel tool_use blocks is the documented
+    capability but Sonnet still gates itself to one block per response.
+
+    Loop control:
+
+      1. Build the initial request (system prompt + Field Map + PDF +
+         instruction).
+      2. messages.create → parse tool_use blocks → log call → accumulate
+         records and usage.
+      3. If ``stop_reason == "tool_use"``: append the assistant message
+         and a synthetic user message of ``tool_result`` blocks (one per
+         tool_use, ``content="recorded"``), then loop back to step 2 with
+         the augmented messages list.
+      4. Any other ``stop_reason`` (``end_turn``, ``max_tokens``,
+         ``stop_sequence``): exit cleanly.
+      5. ``MAX_TOOL_USE_TURNS`` is the hard cap — log a warning and stop
+         if Claude won't end its turn.
+
+    Returns the union of records across all turns + a summed
+    :class:`_CallUsage` so the per-doc aggregate sees all token spend
+    (cached + uncached).
     """
-    request = _build_request(
+    base_request = _build_request(
         pdf_chunk=chunk,
         field_map=ctx.field_map,
         glossary=ctx.glossary,
@@ -1110,49 +1142,149 @@ def _extract_one_chunk(
         tool_schema=ctx.tool_schema,
     )
 
-    try:
-        response = _create_message_with_retry(ctx.client, request=request)
-    except ClaudeError:
-        # Try to dump the request even on failure for debug forensics.
-        if ctx.debug_dir is not None:
-            try:
-                call_n = ctx.next_call_number(chunk.basename)
-                ctx.debug_dir.mkdir(parents=True, exist_ok=True)
-                req_path = ctx.debug_dir / f"{chunk.basename}-call_{call_n}.req.json"
-                req_path.write_text(
-                    json.dumps(_elide_pdf_base64(request), indent=2, default=str),
-                    encoding="utf-8",
-                )
-            except OSError:  # pragma: no cover - best effort
-                pass
-        raise
+    # Working copy of the conversation. The system block + tools live at
+    # the top level of the kwargs dict; only ``messages`` grows turn over
+    # turn. The cache_control breakpoints stay on the FRONT of the
+    # conversation (system + Field Map text block in the first user
+    # message), so each subsequent turn should report cache_read > 0.
+    messages: list[dict[str, Any]] = list(base_request["messages"])
 
-    _log_cache_usage(
-        response,
-        run_id=ctx.run_id,
-        model=model,
-        doc_basename=chunk.basename,
-        expected_cached=ctx.expected_cached,
-        cache_miss_reason_hint=cache_miss_reason_hint,
-    )
+    collected_records: list[ExtractedField] = []
+    total_usage = _CallUsage()
+    last_stop: str | None = None
+    last_response: Any = None
+    turn_idx = 0
 
-    if ctx.debug_dir is not None:
-        call_n = ctx.next_call_number(chunk.basename)
-        _save_debug_artifacts(
-            debug_dir=ctx.debug_dir,
-            doc_id=chunk.basename,
-            call_n=call_n,
-            request=request,
-            response=response,
+    for turn_idx in range(MAX_TOOL_USE_TURNS):
+        request = dict(base_request)
+        request["messages"] = messages
+
+        try:
+            response = _create_message_with_retry(ctx.client, request=request)
+        except ClaudeError:
+            # Try to dump the request even on failure for debug forensics.
+            if ctx.debug_dir is not None:
+                try:
+                    call_n = ctx.next_call_number(chunk.basename)
+                    ctx.debug_dir.mkdir(parents=True, exist_ok=True)
+                    req_path = (
+                        ctx.debug_dir / f"{chunk.basename}-call_{call_n}.req.json"
+                    )
+                    req_path.write_text(
+                        json.dumps(_elide_pdf_base64(request), indent=2, default=str),
+                        encoding="utf-8",
+                    )
+                except OSError:  # pragma: no cover - best effort
+                    pass
+            raise
+
+        # First turn of the chunk uses the caller's cache-miss hint; later
+        # turns are always expected to hit cache (the system + Field Map
+        # prefix is identical across turns).
+        turn_hint = cache_miss_reason_hint if turn_idx == 0 else None
+        turn_expected_cached = ctx.expected_cached or turn_idx > 0
+        _log_cache_usage(
+            response,
+            run_id=ctx.run_id,
+            model=model,
+            doc_basename=chunk.basename,
+            expected_cached=turn_expected_cached,
+            cache_miss_reason_hint=turn_hint,
         )
 
-    # After the first successful call the system+field_map prefix is in
-    # the cache; subsequent calls are expected to hit it.
-    ctx.expected_cached = True
+        if ctx.debug_dir is not None:
+            call_n = ctx.next_call_number(chunk.basename)
+            _save_debug_artifacts(
+                debug_dir=ctx.debug_dir,
+                doc_id=chunk.basename,
+                call_n=call_n,
+                request=request,
+                response=response,
+            )
 
-    records = _extract_tool_use_records(response, pdf_chunk=chunk, model=model)
-    usage = _usage_from_response(response)
-    return records, usage
+        # After the first successful call the system+field_map prefix is
+        # in the cache; subsequent calls are expected to hit it.
+        ctx.expected_cached = True
+
+        new_records = _extract_tool_use_records(
+            response, pdf_chunk=chunk, model=model
+        )
+        collected_records.extend(new_records)
+        total_usage.add(_usage_from_response(response))
+
+        last_response = response
+        last_stop = getattr(response, "stop_reason", None)
+
+        if last_stop != "tool_use":
+            # Claude signaled it's done (end_turn / max_tokens / stop_sequence)
+            # OR the response had no usable tool_use blocks. Exit the loop.
+            break
+
+        # Claude wants to continue — append the assistant turn and a
+        # tool_result for every record_extracted_field tool_use we just
+        # processed, then re-enter the loop.
+        assistant_content = getattr(response, "content", []) or []
+        messages.append({"role": "assistant", "content": list(assistant_content)})
+
+        tool_results: list[dict[str, Any]] = []
+        for block in assistant_content:
+            if getattr(block, "type", None) != "tool_use":
+                continue
+            if getattr(block, "name", None) != "record_extracted_field":
+                continue
+            tool_use_id = getattr(block, "id", None)
+            if not tool_use_id:
+                continue
+            # Plain dicts are accepted by the SDK as ToolResultBlockParam —
+            # no need to import a specific type. Content is a constant
+            # acknowledgment so it doesn't bloat the conversation.
+            tool_results.append(
+                {
+                    "type": "tool_result",
+                    "tool_use_id": tool_use_id,
+                    "content": "recorded",
+                }
+            )
+
+        if not tool_results:
+            # Defensive: stop_reason was tool_use but we have no tool_use
+            # blocks to acknowledge. Without a tool_result Claude would
+            # 400 the next request, so break out cleanly.
+            logger.warning(
+                "claude.tool_use_loop_no_tool_results run_id=%s doc=%s turn=%d",
+                ctx.run_id,
+                chunk.basename,
+                turn_idx + 1,
+            )
+            break
+
+        messages.append({"role": "user", "content": tool_results})
+    else:
+        # for-else: we exhausted MAX_TOOL_USE_TURNS without seeing a
+        # non-tool_use stop_reason. Log + stop with what we have.
+        logger.warning(
+            "claude.tool_loop_max_turns_reached run_id=%s doc=%s turns=%d records=%d",
+            ctx.run_id,
+            chunk.basename,
+            MAX_TOOL_USE_TURNS,
+            len(collected_records),
+        )
+
+    logger.info(
+        "claude.tool_loop_finished run_id=%s doc=%s turns=%d total_tool_calls=%d "
+        "stop_reason=%s",
+        ctx.run_id,
+        chunk.basename,
+        turn_idx + 1,
+        len(collected_records),
+        last_stop,
+    )
+
+    # Suppress an unused-variable lint: ``last_response`` is retained for
+    # future debugging hooks (e.g., dumping the final assistant turn).
+    del last_response
+
+    return collected_records, total_usage
 
 
 # ----- Merge across chunks ---------------------------------------------------

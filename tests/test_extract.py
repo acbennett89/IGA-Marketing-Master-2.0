@@ -898,21 +898,26 @@ def test_default_glossary_clears_2048_token_cache_minimum_combined() -> None:
 
 
 def test_default_system_prompt_has_output_protocol_section() -> None:
-    """Bug 8 regression: the system prompt must explicitly tell Claude to
-    emit MANY parallel record_extracted_field tool_use calls in a single
-    response. Without this, Sonnet conservatively emits one tool_use and
-    stops, returning just a single field per PDF (the diagnostic
-    'output=175 tokens, 1 field extracted on a 30-field page' bug).
+    """fix-pass-3: the system prompt must describe the iterative tool-use
+    loop accurately — Sonnet 4.6 emits one tool_use per response and the
+    pipeline drives the multi-turn agentic loop documented at
+    https://docs.anthropic.com/en/docs/build-with-claude/tool-use.
+
+    Without this section Claude doesn't know it can keep going; it
+    extracts one field and stops (the 'output=175 tokens, 1 field
+    extracted on a 30-field page' bug from fix-pass-2 diagnostics).
     """
     text = extract._DEFAULT_SYSTEM_PROMPT
     text_lower = text.lower()
     # Header for the section.
     assert "output protocol" in text_lower
-    # Semantic requirements: parallel, many calls per response.
-    assert "parallel" in text_lower
-    assert "multiple" in text_lower or "many" in text_lower
-    # Anti-pattern: don't stop at one.
-    assert "do not emit a single" in text_lower or "do not stop" in text_lower
+    # Semantic requirements: iterative tool-use loop with continue-until-done.
+    assert "loop" in text_lower
+    assert "iterative" in text_lower or "multi-turn" in text_lower
+    # Anti-pattern: don't stop early.
+    assert "do not stop" in text_lower or "every extractable field" in text_lower
+    # End-turn-when-done callout (the loop's exit condition).
+    assert "end your turn" in text_lower
     # Repeatable-group guidance lives in this section so Claude sees it
     # in the most-prominent position.
     assert "repeatable_group" in text
