@@ -1,0 +1,45 @@
+# IGA Marketing Master 2.0 — git ignore rules.
+# Windows + Python standard exclusions plus project-specific runtime artifacts.
+
+# --- Python bytecode + caches ---
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# --- Virtual environments ---
+.venv/
+venv/
+env/
+
+# --- Build / packaging artifacts ---
+*.egg-info/
+dist/
+build/
+
+# --- Test / lint caches ---
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# --- Windows / macOS noise ---
+Thumbs.db
+.DS_Store
+desktop.ini
+
+# --- Editor / IDE configs ---
+.vscode/
+.idea/
+
+# --- Project runtime state (per PLAN-REVIEW.md, never committed) ---
+Working Library/
+
+# --- Backups, temp, debug ---
+*.bak
+*.tmp
+debug/
+
+# --- Secrets ---
+.env
+secrets.dat
+*.key

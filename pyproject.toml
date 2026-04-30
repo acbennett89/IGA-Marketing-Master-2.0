@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "iga-marketing-master-2"
+version = "0.1.0"
+description = "Single-user Windows desktop tool that extracts insurance data from PDFs via the Claude API and enters it into Applied EPIC via Playwright, with a stateful per-client review/edit GUI in between."
+requires-python = ">=3.13"
+readme = "README.md"
+license = { text = "Proprietary" }
+authors = [
+    { name = "Andrew Bennett" }
+]
+dependencies = [
+    "anthropic",
+    "playwright>=1.55",
+    "PySide6>=6.6",
+    "pypdf",
+    "keyring",
+    "platformdirs",
+    "pywin32",
+]
+
+[project.scripts]
+iga-marketing-master-2 = "iga_marketing_master_2.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+"iga_marketing_master_2" = ["py.typed"]

@@ -1,0 +1,11 @@
+# IGA Marketing Master 2.0 — Python dependencies.
+# Pinned versions to be finalized by developer agents during Phase 1; ranges
+# below reflect the floor established by PLAN-REVIEW.md research findings.
+
+anthropic
+playwright>=1.55
+PySide6>=6.6
+pypdf
+keyring
+platformdirs
+pywin32
