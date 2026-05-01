@@ -21,16 +21,20 @@ import os
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
-from PySide6.QtCore import QObject, QThread, Qt, Signal
-from PySide6.QtGui import QAction
+from PySide6.QtCore import QObject, QSettings, QThread, QTimer, QUrl, Qt, Signal
+from PySide6.QtGui import QAction, QDesktopServices, QKeySequence
 from PySide6.QtWidgets import (
     QApplication,
     QFileDialog,
     QHBoxLayout,
     QLabel,
     QMainWindow,
+    QMenu,
+    QMenuBar,
     QMessageBox,
     QProgressBar,
     QSplitter,
@@ -44,6 +48,7 @@ from .. import config as config_module
 from .. import secret_store
 from ..logger import get_logger
 from .audit_log import AuditLogPane
+from .find_bar import FindBar
 from .operator_modal import (
     ApiKeyPromptDialog,
     ConflictResolutionDialog,
@@ -57,15 +62,50 @@ from .pending_pdfs_pane import PendingPdfsPane
 from .repeatable_pane import RepeatablePane
 from .run_controls import RunControlsBar
 from .section_table import (
+    CONFIDENCE_HIGH_THRESHOLD,
+    BulkActionBar,
     FieldRow,
     SectionTableModel,
     SectionTableView,
+    is_low_confidence_row,
 )
+from .welcome_pane import WelcomePane
 
-__all__ = ["IgaApp", "MainWindow", "TAB_LABELS", "TAB_ORDER"]
+__all__ = [
+    "IgaApp",
+    "MainWindow",
+    "TAB_LABELS",
+    "TAB_ORDER",
+    "build_tab_label",
+    "count_low_confidence_in_tab",
+    "count_tab_field_total",
+    "load_recent_clients",
+    "save_recent_clients",
+    "update_recent_clients",
+]
 
 
 _logger = get_logger("gui.main_window")
+
+
+# ---------------------------------------------------------------------------
+# Persistence keys (QSettings) — centralized so #3 and #6 stay in sync.
+# ---------------------------------------------------------------------------
+
+
+_QSETTINGS_ORG: str = "IGA Marketing"
+_QSETTINGS_APP: str = "IGA Marketing Master 2.0"
+
+_QS_GEOMETRY: str = "ui/geometry"
+_QS_WINDOW_STATE: str = "ui/windowState"
+_QS_CENTER_SPLITTER: str = "ui/centerSplitter"
+_QS_OUTER_SPLITTER: str = "ui/outerSplitter"
+_QS_RECENT_CLIENTS: str = "session/recentClients"
+_QS_VIEW_PDF_VISIBLE: str = "view/pdfPreviewVisible"
+_QS_VIEW_AUDIT_VISIBLE: str = "view/auditLogVisible"
+_QS_VIEW_LOW_CONF_FILTER: str = "view/lowConfidenceFilter"
+
+_RECENT_CLIENTS_MAX: int = 5
 
 
 # ---------------------------------------------------------------------------
@@ -149,6 +189,161 @@ def label_for_tab_key(key: str) -> str:
     if key in TAB_LABELS:
         return TAB_LABELS[key]
     return key.replace("_", " ").replace(".", " · ").title()
+
+
+# ---------------------------------------------------------------------------
+# Tab-badge counting (UX-pass #4) — pure functions, easy to unit-test.
+# ---------------------------------------------------------------------------
+
+
+def count_tab_field_total(state: dict | None, tab_key: str) -> int:
+    """Return the total field/item count surfaced on the named tab.
+
+    For repeatable namespaces (vehicle, location, ...) the count is
+    ``len(state.repeatables[tab_key])``. For singleton tabs it's the
+    number of ``state.fields`` keys whose ``_tab_key_for_tag`` resolves to
+    ``tab_key``.
+    """
+    if not state:
+        return 0
+    if tab_key in REPEATABLE_NAMESPACES:
+        items = (state.get("repeatables") or {}).get(tab_key, [])
+        return len(items) if isinstance(items, list) else 0
+    fields_map: dict = state.get("fields") or {}
+    return sum(1 for tag in fields_map.keys() if _tab_key_for_tag(tag) == tab_key)
+
+
+def count_low_confidence_in_tab(state: dict | None, tab_key: str) -> int:
+    """Return the number of low-confidence fields on the named tab.
+
+    A field counts as low-confidence when ``confidence < CONFIDENCE_HIGH_THRESHOLD``
+    AND its status isn't an operator-blessed terminal state (``approved`` /
+    ``locked``). Repeatable groups walk every record across every item.
+    """
+    if not state:
+        return 0
+
+    def _record_is_low(record: dict) -> bool:
+        if not isinstance(record, dict):
+            return False
+        status = record.get("status", "pending")
+        if status in {"approved", "locked"}:
+            return False
+        try:
+            conf = float(record.get("confidence", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            conf = 0.0
+        return conf < CONFIDENCE_HIGH_THRESHOLD
+
+    if tab_key in REPEATABLE_NAMESPACES:
+        items = (state.get("repeatables") or {}).get(tab_key, [])
+        if not isinstance(items, list):
+            return 0
+        return sum(
+            1
+            for item in items
+            if isinstance(item, dict)
+            for record in item.values()
+            if _record_is_low(record)
+        )
+
+    fields_map: dict = state.get("fields") or {}
+    return sum(
+        1
+        for tag, record in fields_map.items()
+        if _tab_key_for_tag(tag) == tab_key and _record_is_low(record)
+    )
+
+
+def build_tab_label(state: dict | None, tab_key: str) -> str:
+    """Return the user-visible tab label including the count badge.
+
+    Format: ``"<Friendly Name> (N)"`` or ``"<Friendly Name> (N · K!)"`` when
+    ``K`` low-confidence fields exist. Empty tabs render the bare name with no
+    count to keep the chrome quiet.
+    """
+    base = label_for_tab_key(tab_key)
+    total = count_tab_field_total(state, tab_key)
+    if total == 0:
+        return base
+    low = count_low_confidence_in_tab(state, tab_key)
+    if low > 0:
+        return f"{base} ({total} · {low}!)"
+    return f"{base} ({total})"
+
+
+# ---------------------------------------------------------------------------
+# Recent-clients persistence helpers (UX-pass #6) — QSettings-backed.
+# Pure-ish helpers exposed at module scope so tests can drive QSettings via
+# a temporary scope without pulling MainWindow into the picture.
+# ---------------------------------------------------------------------------
+
+
+def load_recent_clients(settings: QSettings) -> list[Path]:
+    """Read the recent-clients list from ``QSettings``."""
+    raw = settings.value(_QS_RECENT_CLIENTS, [])
+    if isinstance(raw, str):
+        # QSettings collapses single-element lists to a string on some
+        # platforms; tolerate that.
+        raw = [raw] if raw else []
+    if not isinstance(raw, (list, tuple)):
+        return []
+    out: list[Path] = []
+    for item in raw:
+        try:
+            out.append(Path(str(item)))
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def save_recent_clients(settings: QSettings, paths: list[Path]) -> None:
+    """Persist the recent-clients list (capped to ``_RECENT_CLIENTS_MAX``)."""
+    capped = [str(p) for p in paths[:_RECENT_CLIENTS_MAX]]
+    settings.setValue(_QS_RECENT_CLIENTS, capped)
+
+
+def update_recent_clients(existing: list[Path], new_path: Path) -> list[Path]:
+    """Return a deduped, capped list with ``new_path`` at the front.
+
+    Pure helper — does not touch QSettings.
+    """
+    resolved_new = _resolve_or_self(new_path)
+    out: list[Path] = [resolved_new]
+    seen: set[str] = {str(resolved_new).lower()}
+    for p in existing:
+        key = str(_resolve_or_self(p)).lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(p)
+        if len(out) >= _RECENT_CLIENTS_MAX:
+            break
+    return out[:_RECENT_CLIENTS_MAX]
+
+
+def _resolve_or_self(p: Path) -> Path:
+    """``Path.resolve()`` with a self-fallback for missing folders."""
+    try:
+        return p.resolve()
+    except OSError:
+        return p
+
+
+def humanize_seconds_ago(seconds: float) -> str:
+    """Render an "X ago" timestamp suitable for the status bar.
+
+    Pure function. Negative or zero seconds collapse to ``"just now"``.
+    """
+    if seconds <= 1:
+        return "just now"
+    if seconds < 60:
+        return f"{int(seconds)}s ago"
+    if seconds < 3600:
+        return f"{int(seconds // 60)}m ago"
+    if seconds < 86400:
+        return f"{int(seconds // 3600)}h ago"
+    return f"{int(seconds // 86400)}d ago"
 
 
 # ---------------------------------------------------------------------------
@@ -439,6 +634,9 @@ class _ClientContext:
     path: Path
     state: dict
     inputs_dir: Path
+    # Tracked here (not on MainWindow) so multi-client switching can't
+    # leak a stale "saved 3s ago" message across clients.
+    last_save_at: datetime | None = None
 
     @property
     def state_path(self) -> Path:
@@ -465,51 +663,121 @@ class MainWindow(QMainWindow):
         # run-controls can clear themselves correctly on finish/fail.
         self._active_run_kind: str | None = None  # "extract" | "entry" | None
 
+        # Persistent settings (QSettings) — used for geometry, recent clients,
+        # and view-menu checkable states. Wrapped in a try so headless test
+        # environments without an organization registry still work.
+        self._qsettings: QSettings = QSettings(_QSETTINGS_ORG, _QSETTINGS_APP)
+
+        # UX state for #8 / #9 — tracked on the window so all section views
+        # share a single source of truth.
+        self._find_query: str = ""
+        self._low_confidence_filter: bool = False
+
+        # Cache of QAction objects we need to enable/disable from
+        # _refresh_run_controls (so Ctrl+E etc. follow the button gating).
+        self._run_actions: dict[str, QAction] = {}
+        # Cache of recent-clients QActions so we can rebuild on aboutToShow.
+        self._recent_menu: QMenu | None = None
+        # The "Get started" empty-state widget; we reuse one instance.
+        self._welcome_pane: WelcomePane | None = None
+        # Track widgets so toggles (View → Show PDF Preview, etc.) work.
+        self._center_split: QSplitter | None = None
+        self._outer_split: QSplitter | None = None
+        self._bottom_widget: QWidget | None = None
+
         self.setWindowTitle("IGA Marketing Master 2.0")
         self.resize(1400, 900)
         self.setAcceptDrops(True)
 
         self._build_ui()
+        self._build_menu_bar()
+        self._restore_persisted_layout()
         self._handle_first_run_and_api_key()
         self._maybe_seed_initial_client()
+        # If _maybe_seed_initial_client didn't load a client, _rebuild_tabs
+        # paints the welcome empty-state tab. Loading a client also calls
+        # _rebuild_tabs so this is idempotent.
+        if self._client is None:
+            self._rebuild_tabs()
         self._refresh_run_controls()
         self._refresh_pending_pdfs_state()
+        self._update_status_bar_idle()
+
+        # Tick the "saved X ago" status text every 30s so the operator sees
+        # it tick over without having to interact.
+        self._status_timer: QTimer = QTimer(self)
+        self._status_timer.setInterval(30_000)
+        self._status_timer.timeout.connect(self._update_status_bar_idle)
+        self._status_timer.start()
 
     # -- UI construction ---------------------------------------------------
 
     def _build_ui(self) -> None:
         # Top toolbar — client picker + file drop / browse.
-        toolbar = QToolBar("Workspace", self)
-        toolbar.setMovable(False)
-        self.addToolBar(toolbar)
+        self._toolbar = QToolBar("Workspace", self)
+        self._toolbar.setMovable(False)
+        self._toolbar.setObjectName("WorkspaceToolbar")
+        self.addToolBar(self._toolbar)
 
         pick_action = QAction("Pick client...", self)
         pick_action.triggered.connect(self._on_pick_client)
-        toolbar.addAction(pick_action)
+        self._toolbar.addAction(pick_action)
 
         new_client_action = QAction("New client...", self)
         new_client_action.triggered.connect(self._on_create_client)
-        toolbar.addAction(new_client_action)
+        self._toolbar.addAction(new_client_action)
 
-        toolbar.addSeparator()
+        self._toolbar.addSeparator()
 
         add_pdfs_action = QAction("Add PDFs...", self)
         add_pdfs_action.triggered.connect(self._on_add_pdfs)
-        toolbar.addAction(add_pdfs_action)
+        self._toolbar.addAction(add_pdfs_action)
+
+        self._toolbar.addSeparator()
+
+        # UX-pass #10: Extract / Begin Entry on the toolbar mirror the
+        # bottom run-controls bar so the operator can find them wherever
+        # their eyes land.
+        toolbar_extract = QAction("Extract", self)
+        toolbar_extract.setToolTip("Run extraction on queued PDFs (Ctrl+E).")
+        toolbar_extract.triggered.connect(self._on_extract_clicked)
+        self._toolbar.addAction(toolbar_extract)
+        self._run_actions["toolbar_extract"] = toolbar_extract
+
+        toolbar_begin = QAction("Begin Entry", self)
+        toolbar_begin.setToolTip("Start entering approved fields into EPIC (Ctrl+Enter).")
+        toolbar_begin.triggered.connect(self._on_begin_entry)
+        self._toolbar.addAction(toolbar_begin)
+        self._run_actions["toolbar_begin"] = toolbar_begin
 
         # Central widget: horizontal splitter — tabs on left, PDF preview on right.
         self._tabs = QTabWidget(self)
         self._tabs.setDocumentMode(True)
         self._tabs.setTabsClosable(False)
 
+        # FindBar sits above the tabs. Hidden until Ctrl+F is pressed.
+        self._find_bar = FindBar(self)
+        self._find_bar.query_changed.connect(self._on_find_query_changed)
+        self._find_bar.closed.connect(self._on_find_bar_closed)
+
+        # Container that holds find_bar + tabs together so the splitter
+        # treats them as one unit.
+        tabs_container = QWidget(self)
+        tabs_container_layout = QVBoxLayout(tabs_container)
+        tabs_container_layout.setContentsMargins(0, 0, 0, 0)
+        tabs_container_layout.setSpacing(0)
+        tabs_container_layout.addWidget(self._find_bar)
+        tabs_container_layout.addWidget(self._tabs, 1)
+
         self._pdf_preview = PdfPreview(self)
 
-        center_split = QSplitter(self)
-        center_split.setOrientation(Qt.Orientation.Horizontal)
-        center_split.addWidget(self._tabs)
-        center_split.addWidget(self._pdf_preview)
-        center_split.setStretchFactor(0, 3)
-        center_split.setStretchFactor(1, 2)
+        self._center_split = QSplitter(self)
+        self._center_split.setOrientation(Qt.Orientation.Horizontal)
+        self._center_split.setObjectName("CenterSplitter")
+        self._center_split.addWidget(tabs_container)
+        self._center_split.addWidget(self._pdf_preview)
+        self._center_split.setStretchFactor(0, 3)
+        self._center_split.setStretchFactor(1, 2)
 
         # Bottom: pending-PDFs queue + audit log + run controls.
         self._pending_pdfs_pane = PendingPdfsPane(self)
@@ -527,8 +795,8 @@ class MainWindow(QMainWindow):
         self._run_controls.cancel_clicked.connect(self._on_cancel)
         self._run_controls.resume_clicked.connect(self._on_resume)
 
-        bottom = QWidget(self)
-        bottom_layout = QVBoxLayout(bottom)
+        self._bottom_widget = QWidget(self)
+        bottom_layout = QVBoxLayout(self._bottom_widget)
         bottom_layout.setContentsMargins(0, 0, 0, 0)
         bottom_layout.setSpacing(2)
         bottom_layout.addWidget(pending_label)
@@ -537,14 +805,15 @@ class MainWindow(QMainWindow):
         bottom_layout.addWidget(self._run_controls)
 
         # Outer vertical splitter.
-        outer_split = QSplitter(self)
-        outer_split.setOrientation(Qt.Orientation.Vertical)
-        outer_split.addWidget(center_split)
-        outer_split.addWidget(bottom)
-        outer_split.setStretchFactor(0, 4)
-        outer_split.setStretchFactor(1, 1)
+        self._outer_split = QSplitter(self)
+        self._outer_split.setOrientation(Qt.Orientation.Vertical)
+        self._outer_split.setObjectName("OuterSplitter")
+        self._outer_split.addWidget(self._center_split)
+        self._outer_split.addWidget(self._bottom_widget)
+        self._outer_split.setStretchFactor(0, 4)
+        self._outer_split.setStretchFactor(1, 1)
 
-        self.setCentralWidget(outer_split)
+        self.setCentralWidget(self._outer_split)
 
         # Status bar: text on the left, indeterminate-by-default progress
         # bar on the right (hidden when idle). The progress strip is the
@@ -557,6 +826,359 @@ class MainWindow(QMainWindow):
         self._progress_bar.setTextVisible(False)
         self.statusBar().addPermanentWidget(self._progress_bar)
         self.statusBar().showMessage("Ready.")
+
+    # -- Menu bar (UX-pass #1, #2) ------------------------------------------
+
+    def _build_menu_bar(self) -> None:  # noqa: C901 — menu wiring is naturally long
+        menubar: QMenuBar = self.menuBar()
+        menubar.clear()
+
+        # ----- File ------------------------------------------------------
+        file_menu = menubar.addMenu("&File")
+
+        act_new = QAction("New Client...", self)
+        act_new.setShortcut(QKeySequence("Ctrl+N"))
+        act_new.triggered.connect(self._on_create_client)
+        file_menu.addAction(act_new)
+
+        act_pick = QAction("Pick Client...", self)
+        act_pick.setShortcut(QKeySequence("Ctrl+O"))
+        act_pick.triggered.connect(self._on_pick_client)
+        file_menu.addAction(act_pick)
+
+        self._recent_menu = file_menu.addMenu("Recent Clients")
+        self._recent_menu.aboutToShow.connect(self._rebuild_recent_clients_menu)
+        # Seed an initial entry so the first show isn't empty.
+        self._rebuild_recent_clients_menu()
+
+        file_menu.addSeparator()
+
+        act_add_pdfs = QAction("Add PDFs...", self)
+        act_add_pdfs.setShortcut(QKeySequence("Ctrl+Shift+O"))
+        act_add_pdfs.triggered.connect(self._on_add_pdfs)
+        file_menu.addAction(act_add_pdfs)
+
+        act_save = QAction("Save State", self)
+        act_save.setShortcut(QKeySequence("Ctrl+S"))
+        act_save.triggered.connect(self._on_save_state_explicit)
+        file_menu.addAction(act_save)
+
+        file_menu.addSeparator()
+
+        act_close = QAction("Close Client", self)
+        act_close.triggered.connect(self._on_close_client)
+        file_menu.addAction(act_close)
+
+        act_exit = QAction("Exit", self)
+        act_exit.setShortcut(QKeySequence("Alt+F4"))
+        act_exit.triggered.connect(self.close)
+        file_menu.addAction(act_exit)
+
+        # ----- Edit ------------------------------------------------------
+        edit_menu = menubar.addMenu("&Edit")
+
+        act_find = QAction("Find Field...", self)
+        act_find.setShortcut(QKeySequence("Ctrl+F"))
+        act_find.triggered.connect(self._on_open_find_bar)
+        edit_menu.addAction(act_find)
+
+        edit_menu.addSeparator()
+
+        act_approve_all = QAction("Approve All in Section", self)
+        act_approve_all.setShortcut(QKeySequence("Ctrl+Shift+A"))
+        act_approve_all.triggered.connect(
+            lambda: self._on_bulk_action_active_tab("approve_all")
+        )
+        edit_menu.addAction(act_approve_all)
+
+        act_reject_all = QAction("Reject All in Section", self)
+        act_reject_all.triggered.connect(
+            lambda: self._on_bulk_action_active_tab("reject_all")
+        )
+        edit_menu.addAction(act_reject_all)
+
+        act_lock_all = QAction("Lock All Approved", self)
+        act_lock_all.triggered.connect(
+            lambda: self._on_bulk_action_active_tab("lock_all_approved")
+        )
+        edit_menu.addAction(act_lock_all)
+
+        # ----- View ------------------------------------------------------
+        view_menu = menubar.addMenu("&View")
+
+        self._act_low_conf_filter = QAction("Show Only Low-Confidence", self)
+        self._act_low_conf_filter.setShortcut(QKeySequence("Ctrl+L"))
+        self._act_low_conf_filter.setCheckable(True)
+        self._act_low_conf_filter.toggled.connect(self._on_low_confidence_toggled)
+        view_menu.addAction(self._act_low_conf_filter)
+
+        view_menu.addSeparator()
+
+        self._act_show_pdf = QAction("Show PDF Preview", self)
+        self._act_show_pdf.setCheckable(True)
+        self._act_show_pdf.setChecked(True)
+        self._act_show_pdf.toggled.connect(self._on_toggle_pdf_preview)
+        view_menu.addAction(self._act_show_pdf)
+
+        self._act_show_audit = QAction("Show Audit Log", self)
+        self._act_show_audit.setCheckable(True)
+        self._act_show_audit.setChecked(True)
+        self._act_show_audit.toggled.connect(self._on_toggle_audit_log)
+        view_menu.addAction(self._act_show_audit)
+
+        view_menu.addSeparator()
+
+        act_reset_layout = QAction("Reset Layout", self)
+        act_reset_layout.triggered.connect(self._on_reset_layout)
+        view_menu.addAction(act_reset_layout)
+
+        # ----- Run -------------------------------------------------------
+        run_menu = menubar.addMenu("&Run")
+
+        act_run_extract = QAction("Extract", self)
+        act_run_extract.setShortcut(QKeySequence("Ctrl+E"))
+        act_run_extract.triggered.connect(self._on_extract_clicked)
+        run_menu.addAction(act_run_extract)
+        self._run_actions["menu_extract"] = act_run_extract
+
+        act_run_begin = QAction("Begin Entry", self)
+        act_run_begin.setShortcut(QKeySequence("Ctrl+Return"))
+        act_run_begin.triggered.connect(self._on_begin_entry)
+        run_menu.addAction(act_run_begin)
+        self._run_actions["menu_begin"] = act_run_begin
+
+        act_run_cancel = QAction("Cancel Current Run", self)
+        act_run_cancel.setShortcut(QKeySequence("Esc"))
+        act_run_cancel.triggered.connect(self._on_cancel)
+        run_menu.addAction(act_run_cancel)
+        self._run_actions["menu_cancel"] = act_run_cancel
+
+        act_run_resume = QAction("Resume Paused Entry", self)
+        act_run_resume.triggered.connect(self._on_resume)
+        run_menu.addAction(act_run_resume)
+        self._run_actions["menu_resume"] = act_run_resume
+
+        # ----- Help ------------------------------------------------------
+        help_menu = menubar.addMenu("&Help")
+
+        act_open_troubleshoot = QAction("Open TROUBLESHOOTING.md", self)
+        act_open_troubleshoot.triggered.connect(self._on_open_troubleshooting)
+        help_menu.addAction(act_open_troubleshoot)
+
+        act_open_console = QAction("Open Anthropic Console", self)
+        act_open_console.triggered.connect(
+            lambda: QDesktopServices.openUrl(QUrl("https://console.anthropic.com/"))
+        )
+        help_menu.addAction(act_open_console)
+
+        help_menu.addSeparator()
+
+        act_about = QAction("About IGA Marketing Master", self)
+        act_about.triggered.connect(self._on_about)
+        help_menu.addAction(act_about)
+
+        act_report = QAction("Report an Issue", self)
+        act_report.triggered.connect(
+            lambda: QDesktopServices.openUrl(
+                QUrl("https://github.com/anthropics/claude-code/issues")
+            )
+        )
+        help_menu.addAction(act_report)
+
+    # -- Menu handlers (small one-liners that didn't have a home before) ---
+
+    def _on_save_state_explicit(self) -> None:
+        """File → Save State. State auto-saves on edits; this is a nudge."""
+        if self._client is None:
+            self.statusBar().showMessage("No client to save.", 3_000)
+            return
+        self._persist_state()
+        self.statusBar().showMessage("State saved.", 3_000)
+        self._update_status_bar_idle()
+
+    def _on_close_client(self) -> None:
+        if self._client is None:
+            return
+        self._audit_log.append_event(f"Closed client: {self._client.name}")
+        self._client = None
+        self.setWindowTitle("IGA Marketing Master 2.0")
+        self._rebuild_tabs()
+        self._refresh_run_controls()
+        self._update_status_bar_idle()
+
+    def _on_open_find_bar(self) -> None:
+        self._find_bar.open()
+
+    def _on_find_bar_closed(self) -> None:
+        # Clearing the line edit fires textChanged("") which already clears
+        # the filter; this is here to capture the close-without-edit path.
+        self._find_query = ""
+        self._reapply_filters_to_visible_tabs()
+        self._tabs.setFocus()
+
+    def _on_find_query_changed(self, text: str) -> None:
+        self._find_query = text
+        self._reapply_filters_to_visible_tabs()
+
+    def _on_low_confidence_toggled(self, checked: bool) -> None:
+        self._low_confidence_filter = bool(checked)
+        self._qsettings.setValue(_QS_VIEW_LOW_CONF_FILTER, self._low_confidence_filter)
+        self._reapply_filters_to_visible_tabs()
+        self._update_status_bar_idle()
+
+    def _on_toggle_pdf_preview(self, checked: bool) -> None:
+        if self._pdf_preview is not None:
+            self._pdf_preview.setVisible(checked)
+        self._qsettings.setValue(_QS_VIEW_PDF_VISIBLE, bool(checked))
+
+    def _on_toggle_audit_log(self, checked: bool) -> None:
+        if self._audit_log is not None:
+            self._audit_log.setVisible(checked)
+        self._qsettings.setValue(_QS_VIEW_AUDIT_VISIBLE, bool(checked))
+
+    def _on_reset_layout(self) -> None:
+        # Clear persisted geometry/state and force a sane default.
+        for key in (
+            _QS_GEOMETRY,
+            _QS_WINDOW_STATE,
+            _QS_CENTER_SPLITTER,
+            _QS_OUTER_SPLITTER,
+        ):
+            self._qsettings.remove(key)
+        self.resize(1400, 900)
+        if self._center_split is not None:
+            self._center_split.setSizes([900, 500])
+        if self._outer_split is not None:
+            self._outer_split.setSizes([700, 200])
+        # Re-show panes that may have been hidden via the View toggles.
+        self._act_show_pdf.setChecked(True)
+        self._act_show_audit.setChecked(True)
+        self.statusBar().showMessage("Layout reset.", 3_000)
+
+    def _on_open_troubleshooting(self) -> None:
+        # Look for TROUBLESHOOTING.md alongside the package's repo root.
+        # When run from an editable install we walk up until we find it.
+        candidate: Path | None = None
+        cursor = Path(__file__).resolve()
+        for parent in [cursor, *cursor.parents]:
+            potential = parent / "TROUBLESHOOTING.md"
+            if potential.exists():
+                candidate = potential
+                break
+        if candidate is None:
+            QMessageBox.information(
+                self,
+                "Couldn't find TROUBLESHOOTING.md",
+                "TROUBLESHOOTING.md isn't on disk in the install tree.\n"
+                "Try the GitHub repo instead.",
+            )
+            return
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(candidate)))
+
+    def _on_about(self) -> None:
+        commit = _safe_git_commit()
+        py = ".".join(str(x) for x in sys.version_info[:3])
+        QMessageBox.about(
+            self,
+            "About IGA Marketing Master",
+            (
+                "<h3>IGA Marketing Master 2.0</h3>"
+                f"<p>Build commit: <code>{commit}</code></p>"
+                f"<p>Python: {py}</p>"
+                "<p>Workflow docs: <code>docs/workflow/</code></p>"
+                "<p>Anthropic Claude Agent SDK + PySide6.</p>"
+            ),
+        )
+
+    # -- Recent clients (UX-pass #6) ----------------------------------------
+
+    def _rebuild_recent_clients_menu(self) -> None:
+        """Repopulate the Recent Clients submenu from QSettings."""
+        if self._recent_menu is None:
+            return
+        self._recent_menu.clear()
+        recent = load_recent_clients(self._qsettings)
+        if not recent:
+            empty = QAction("(no recent clients)", self)
+            empty.setEnabled(False)
+            self._recent_menu.addAction(empty)
+            return
+        for path in recent:
+            label = self._format_recent_label(path)
+            action = QAction(label, self)
+            if not path.exists():
+                action.setEnabled(False)
+            else:
+                # Bind the path via default-arg trick so the closure
+                # captures *this* path, not the loop variable.
+                action.triggered.connect(lambda _checked=False, p=path: self._load_client(p))
+            self._recent_menu.addAction(action)
+
+    @staticmethod
+    def _format_recent_label(path: Path) -> str:
+        """Render `client_name (parent_dir_basename)`; append `(missing)` if gone."""
+        name = path.name or str(path)
+        parent = path.parent.name if path.parent and path.parent.name else "(root)"
+        suffix = "" if path.exists() else " (missing)"
+        return f"{name} ({parent}){suffix}"
+
+    def _push_recent_client(self, path: Path) -> None:
+        existing = load_recent_clients(self._qsettings)
+        updated = update_recent_clients(existing, path)
+        save_recent_clients(self._qsettings, updated)
+
+    # -- Layout persistence (UX-pass #3) ------------------------------------
+
+    def _restore_persisted_layout(self) -> None:
+        """Restore geometry, splitter sizes, and view-menu states from QSettings.
+
+        Tolerant of missing/corrupted values — falls back to defaults silently.
+        """
+        try:
+            geometry = self._qsettings.value(_QS_GEOMETRY)
+            if geometry:
+                self.restoreGeometry(geometry)
+            window_state = self._qsettings.value(_QS_WINDOW_STATE)
+            if window_state:
+                self.restoreState(window_state)
+            center = self._qsettings.value(_QS_CENTER_SPLITTER)
+            if center and self._center_split is not None:
+                self._center_split.restoreState(center)
+            outer = self._qsettings.value(_QS_OUTER_SPLITTER)
+            if outer and self._outer_split is not None:
+                self._outer_split.restoreState(outer)
+        except Exception as exc:  # noqa: BLE001
+            _logger.warning("could not restore layout from QSettings: %s", exc)
+
+        # View-menu checkable states (visibility + low-confidence filter).
+        pdf_visible = _to_bool(self._qsettings.value(_QS_VIEW_PDF_VISIBLE, True))
+        audit_visible = _to_bool(self._qsettings.value(_QS_VIEW_AUDIT_VISIBLE, True))
+        low_conf = _to_bool(self._qsettings.value(_QS_VIEW_LOW_CONF_FILTER, False))
+
+        if hasattr(self, "_act_show_pdf"):
+            self._act_show_pdf.setChecked(pdf_visible)
+            self._pdf_preview.setVisible(pdf_visible)
+        if hasattr(self, "_act_show_audit"):
+            self._act_show_audit.setChecked(audit_visible)
+            self._audit_log.setVisible(audit_visible)
+        if hasattr(self, "_act_low_conf_filter"):
+            self._act_low_conf_filter.setChecked(low_conf)
+            self._low_confidence_filter = low_conf
+
+    def _persist_layout(self) -> None:
+        try:
+            self._qsettings.setValue(_QS_GEOMETRY, self.saveGeometry())
+            self._qsettings.setValue(_QS_WINDOW_STATE, self.saveState())
+            if self._center_split is not None:
+                self._qsettings.setValue(_QS_CENTER_SPLITTER, self._center_split.saveState())
+            if self._outer_split is not None:
+                self._qsettings.setValue(_QS_OUTER_SPLITTER, self._outer_split.saveState())
+        except Exception as exc:  # noqa: BLE001
+            _logger.warning("could not persist layout to QSettings: %s", exc)
+
+    def closeEvent(self, event) -> None:  # noqa: N802 (Qt-style)
+        self._persist_layout()
+        super().closeEvent(event)
 
     # -- First-run / API key flow -------------------------------------------
 
@@ -672,8 +1294,10 @@ class MainWindow(QMainWindow):
         )
         self.setWindowTitle(f"IGA Marketing Master 2.0 — {client_path.name}")
         self._audit_log.append_event(f"Loaded client: {client_path.name}")
+        self._push_recent_client(client_path)
         self._rebuild_tabs()
         self._refresh_run_controls()
+        self._update_status_bar_idle()
 
         # Recover-interrupted-run flow.
         pending = state.get("pending_extraction") if isinstance(state, dict) else None
@@ -685,7 +1309,12 @@ class MainWindow(QMainWindow):
     def _rebuild_tabs(self) -> None:
         """Diff current tabs against target keys and apply the delta."""
         if self._client is None:
+            # UX-pass #10: empty state. Show a welcome tab instead of nothing.
             self._tabs.clear()
+            if self._welcome_pane is None:
+                self._welcome_pane = WelcomePane(self)
+            self._welcome_pane.setProperty("tab_key", "__welcome__")
+            self._tabs.addTab(self._welcome_pane, "Get started")
             return
         # Two paths: if the tab set hasn't changed, do an in-place refresh
         # (preserves the operator's current tab + scroll position). If the
@@ -698,13 +1327,16 @@ class MainWindow(QMainWindow):
             for i, key in enumerate(target_keys):
                 widget = self._tabs.widget(i)
                 self._refresh_tab_widget(widget, key)
+                self._tabs.setTabText(i, build_tab_label(self._client.state, key))
+            self._reapply_filters_to_visible_tabs()
             return
 
         self._tabs.clear()
         for key in target_keys:
             widget = self._build_tab_widget(key)
             widget.setProperty("tab_key", key)
-            self._tabs.addTab(widget, label_for_tab_key(key))
+            self._tabs.addTab(widget, build_tab_label(self._client.state, key))
+        self._reapply_filters_to_visible_tabs()
 
     def _build_tab_widget(self, key: str) -> QWidget:
         if key in REPEATABLE_NAMESPACES:
@@ -742,6 +1374,13 @@ class MainWindow(QMainWindow):
         # When data changes, the run-controls' approved count may shift.
         model.dataChanged.connect(lambda *_: self._refresh_run_controls())
 
+        # UX-pass #7: per-section bulk-action toolbar.
+        bulk_bar = BulkActionBar(container)
+        bulk_bar.action_requested.connect(
+            lambda kind, k=key: self._on_bulk_action(kind, k)
+        )
+        layout.addWidget(bulk_bar)
+
         layout.addWidget(view)
 
         # Empty-state hint if the tab has no rows yet.
@@ -778,12 +1417,20 @@ class MainWindow(QMainWindow):
 
     def _build_repeatable_tab(self, key: str) -> QWidget:
         container = QWidget(self)
-        layout = QHBoxLayout(container)
+        layout = QVBoxLayout(container)
         layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(2)
 
         items = []
         if self._client is not None:
             items = (self._client.state.get("repeatables") or {}).get(key, [])
+
+        # UX-pass #7: bulk-action bar above the list+form pane.
+        bulk_bar = BulkActionBar(container)
+        bulk_bar.action_requested.connect(
+            lambda kind, k=key: self._on_bulk_action(kind, k)
+        )
+        layout.addWidget(bulk_bar)
 
         pane = RepeatablePane(group=key, items=items, parent=container)
         pane.source_clicked.connect(self._on_source_clicked)
@@ -792,7 +1439,7 @@ class MainWindow(QMainWindow):
         pane.item_added.connect(lambda: self._on_repeatable_add(key))
         pane.item_deleted.connect(lambda idx: self._on_repeatable_delete(key, idx))
         pane.focus_changed.connect(self._on_repeatable_focus)
-        layout.addWidget(pane)
+        layout.addWidget(pane, 1)
         return container
 
     @staticmethod
@@ -869,7 +1516,6 @@ class MainWindow(QMainWindow):
     def _persist_state(self) -> None:
         if self._client is None:
             return
-        from datetime import datetime, timezone
 
         self._client.state["updated_at"] = datetime.now(timezone.utc).isoformat()
         try:
@@ -882,6 +1528,10 @@ class MainWindow(QMainWindow):
                 "The Working Library folder may have disconnected, or the disk is full.\n\n"
                 f"{exc}",
             )
+            return
+        self._client.last_save_at = datetime.now(timezone.utc)
+        # Surface the freshly-updated "saved Xs ago" tag in the status bar.
+        self._update_status_bar_idle()
 
     # -- Repeatable group event handlers -----------------------------------
 
@@ -1102,6 +1752,9 @@ class MainWindow(QMainWindow):
         """Sync the run-controls bar's view of queue size."""
         count = self._pending_pdfs_pane.count()
         self._run_controls.set_pending_pdf_count(count)
+        # Keep the menu/toolbar Extract action gated on queue depth too.
+        approved = self._count_approved_fields(self._client.state) if self._client else 0
+        self._sync_run_actions(approved=approved)
 
     def _on_extract_clicked(self) -> None:
         """Handler for the new Extract button. See gui-fix-2 #1."""
@@ -1202,12 +1855,40 @@ class MainWindow(QMainWindow):
         if self._client is None:
             self._run_controls.set_status_text("No client loaded.")
             self._run_controls.set_approved_count(0)
+            self._sync_run_actions(approved=0)
             return
         approved = self._count_approved_fields(self._client.state)
         self._run_controls.set_status_text(
             f"{self._client.name} — {approved} approved field(s)."
         )
         self._run_controls.set_approved_count(approved)
+        self._sync_run_actions(approved=approved)
+
+    def _sync_run_actions(self, *, approved: int) -> None:
+        """Mirror the bottom run-controls' enabled state onto menu/toolbar QActions.
+
+        Keeps Ctrl+E / Ctrl+Enter / Esc in lockstep with the bottom buttons.
+        """
+        any_run_active = self._active_run_kind is not None
+        queued = self._pending_pdfs_pane.count() if hasattr(self, "_pending_pdfs_pane") else 0
+        can_extract = (queued > 0) and not any_run_active and self._client is not None
+        can_begin = (approved > 0) and not any_run_active and self._client is not None
+        can_cancel = any_run_active
+
+        for key in ("toolbar_extract", "menu_extract"):
+            act = self._run_actions.get(key)
+            if act is not None:
+                act.setEnabled(can_extract)
+        for key in ("toolbar_begin", "menu_begin"):
+            act = self._run_actions.get(key)
+            if act is not None:
+                act.setEnabled(can_begin)
+        cancel_act = self._run_actions.get("menu_cancel")
+        if cancel_act is not None:
+            cancel_act.setEnabled(can_cancel)
+        resume_act = self._run_actions.get("menu_resume")
+        if resume_act is not None:
+            resume_act.setEnabled(any_run_active)
 
     @staticmethod
     def _count_approved_fields(state: dict) -> int:
@@ -1549,7 +2230,10 @@ class MainWindow(QMainWindow):
         """Hide the progress bar and reset the status-bar message."""
         self._progress_bar.setVisible(False)
         self._progress_bar.setRange(0, 0)
+        # Show the brief completion message; it'll be replaced by the rich
+        # idle status on the next timer tick or state-change event.
         self.statusBar().showMessage(idle_message)
+        self._update_status_bar_idle()
 
     def _cleanup_worker(self) -> None:
         if self._worker_thread is not None:
@@ -1558,6 +2242,169 @@ class MainWindow(QMainWindow):
             self._worker_thread = None
         self._worker = None
 
+    # -- Status bar (UX-pass #5) -------------------------------------------
+
+    def _update_status_bar_idle(self) -> None:
+        """Refresh the idle status-bar message.
+
+        Called on a timer (every 30s) and on every state change so the
+        "saved X ago" tag stays current. While a run is in flight the
+        progress strip owns the message; we leave it alone in that case.
+        """
+        if self._active_run_kind is not None:
+            return  # progress strip is driving the status bar
+        if self._client is None:
+            self.statusBar().showMessage("No client loaded.")
+            return
+        total_fields = len((self._client.state.get("fields") or {}))
+        repeatables = self._client.state.get("repeatables") or {}
+        total_items = sum(
+            len(v) for v in repeatables.values() if isinstance(v, list)
+        )
+        if self._client.last_save_at is not None:
+            delta = (datetime.now(timezone.utc) - self._client.last_save_at).total_seconds()
+            saved_str = f"saved {humanize_seconds_ago(delta)}"
+        else:
+            saved_str = "not yet saved"
+        filter_tag = (
+            " · [Low-confidence filter ON]" if self._low_confidence_filter else ""
+        )
+        msg = (
+            f"Client: {self._client.name} · "
+            f"{total_fields} fields · {total_items} items · {saved_str}"
+            f"{filter_tag}"
+        )
+        self.statusBar().showMessage(msg)
+
+    # -- Filter reapply (UX-pass #8, #9) -----------------------------------
+
+    def _reapply_filters_to_visible_tabs(self) -> None:
+        """Apply the current find_query and low_confidence_only state to all tabs.
+
+        Walks every tab's :class:`SectionTableView` (singleton tabs) and the
+        nested view inside each :class:`RepeatablePane` (repeatable tabs),
+        hides non-matching rows, and greys out tab labels whose visible-row
+        count is zero.
+        """
+        for i in range(self._tabs.count()):
+            widget = self._tabs.widget(i)
+            if widget is None:
+                continue
+            key = widget.property("tab_key")
+            if key in (None, "__welcome__"):
+                continue
+            visible = self._apply_filter_to_widget(widget)
+            # Adjust tab text to reflect visibility — but only when the find
+            # query is active (otherwise the badges are the source of truth).
+            if self._find_query and visible == 0:
+                self._tabs.tabBar().setTabTextColor(i, Qt.GlobalColor.gray)
+            else:
+                # Default text color = black (or the OS default).
+                # Resetting to QColor() restores the default brush.
+                from PySide6.QtGui import QColor
+                self._tabs.tabBar().setTabTextColor(i, QColor())
+
+    def _apply_filter_to_widget(self, widget: QWidget) -> int:
+        """Apply filters to all SectionTableView descendants; return total visible rows."""
+        total_visible = 0
+        for view in widget.findChildren(SectionTableView):
+            visible = view.apply_row_visibility(
+                find_query=self._find_query,
+                low_confidence_only=self._low_confidence_filter,
+            )
+            total_visible += visible
+        return total_visible
+
+    # -- Bulk actions (UX-pass #7) -----------------------------------------
+
+    def _on_bulk_action_active_tab(self, action: str) -> None:
+        """Edit-menu entry point: dispatch to the current tab's section."""
+        if self._client is None:
+            return
+        idx = self._tabs.currentIndex()
+        if idx < 0:
+            return
+        widget = self._tabs.widget(idx)
+        if widget is None:
+            return
+        key = widget.property("tab_key")
+        if not isinstance(key, str) or key == "__welcome__":
+            return
+        self._on_bulk_action(action, key)
+
+    def _on_bulk_action(self, action: str, tab_key: str) -> None:
+        """Apply ``action`` to every field in ``tab_key``.
+
+        Called from per-section :class:`BulkActionBar` buttons and from the
+        Edit-menu actions. The single dispatcher means there's exactly one
+        place to update if the action vocabulary grows.
+        """
+        if self._client is None:
+            return
+        changed = self._apply_bulk_action_to_state(self._client.state, action, tab_key)
+        if changed == 0:
+            self.statusBar().showMessage(f"No fields affected ({action}).", 3_000)
+            return
+        self._persist_state()
+        self._audit_log.append_event(
+            f"Bulk action '{action}' on '{tab_key}' affected {changed} field(s)."
+        )
+        self._rebuild_tabs()
+        self._refresh_run_controls()
+
+    @staticmethod
+    def _apply_bulk_action_to_state(state: dict, action: str, tab_key: str) -> int:
+        """Mutate ``state`` in place; return the number of records touched.
+
+        Pure-ish (mutates ``state`` only) so unit tests can drive it without
+        a Qt window. The ``action`` vocabulary matches what
+        :class:`BulkActionBar` emits.
+        """
+        if not isinstance(state, dict):
+            return 0
+        affected = 0
+
+        def _touch(record: dict) -> bool:
+            if not isinstance(record, dict):
+                return False
+            if action == "approve_all":
+                if record.get("status") == "locked":
+                    return False  # locked fields are immutable
+                record["status"] = "approved"
+                return True
+            if action == "reject_all":
+                if record.get("status") == "locked":
+                    return False
+                record["status"] = "pending"
+                record["value"] = None
+                return True
+            if action == "lock_all_approved":
+                if record.get("status") == "approved":
+                    record["status"] = "locked"
+                    return True
+                return False
+            return False
+
+        if tab_key in REPEATABLE_NAMESPACES:
+            items = (state.get("repeatables") or {}).get(tab_key, [])
+            if not isinstance(items, list):
+                return 0
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                for record in item.values():
+                    if _touch(record):
+                        affected += 1
+            return affected
+
+        fields_map: dict = state.get("fields") or {}
+        for tag, record in fields_map.items():
+            if _tab_key_for_tag(tag) != tab_key:
+                continue
+            if _touch(record):
+                affected += 1
+        return affected
+
 
 def _safe_user() -> str:
     """``os.getlogin()`` with a fallback that won't raise on detached terminals."""
@@ -1565,6 +2412,43 @@ def _safe_user() -> str:
         return os.getlogin()
     except OSError:
         return os.environ.get("USERNAME") or os.environ.get("USER") or "unknown"
+
+
+def _safe_git_commit() -> str:
+    """Return a short git rev or "dev" if git isn't available.
+
+    Used by Help → About. Best-effort: never raises.
+    """
+    import subprocess
+
+    try:
+        repo_root = Path(__file__).resolve()
+        for parent in [repo_root, *repo_root.parents]:
+            if (parent / ".git").exists():
+                cmd = ["git", "-C", str(parent), "rev-parse", "--short", "HEAD"]
+                result = subprocess.run(  # noqa: S603 — no shell=True, fixed args
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=2.0,
+                )
+                if result.returncode == 0 and result.stdout.strip():
+                    return result.stdout.strip()
+                break
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return "dev"
+
+
+def _to_bool(value: object) -> bool:
+    """Coerce a QSettings-stored value (might be str "true"/"false") to bool."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+    return bool(value)
 
 
 # ---------------------------------------------------------------------------

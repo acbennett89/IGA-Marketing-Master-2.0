@@ -627,3 +627,451 @@ def test_pdf_preview_fallback_for_missing_file(qapp, tmp_path: Path) -> None:
     preview.open_path(tmp_path / "nonexistent.pdf")
     # Stack should be on the fallback widget.
     assert preview.current_path() is None
+
+
+# ---------------------------------------------------------------------------
+# UX-pass #4 — tab badge calculation
+# ---------------------------------------------------------------------------
+
+
+def test_count_tab_field_total_singleton() -> None:
+    """count_tab_field_total counts state.fields keys whose tab_key matches."""
+    from iga_marketing_master_2.gui.main_window import count_tab_field_total
+
+    state = {
+        "fields": {
+            "policy.gl.aggregate_limit": {"value": 1_000_000},
+            "policy.gl.each_occurrence": {"value": 500_000},
+            "policy.auto.combined_single_limit": {"value": 1_000_000},
+            "submission.name": {"value": "Acme"},
+        },
+        "repeatables": {},
+    }
+    assert count_tab_field_total(state, "policy.gl") == 2
+    assert count_tab_field_total(state, "policy.auto") == 1
+    assert count_tab_field_total(state, "submission") == 1
+    assert count_tab_field_total(state, "policy.umbrella") == 0
+
+
+def test_count_tab_field_total_repeatable() -> None:
+    """count_tab_field_total uses len(repeatables[group]) for repeatable namespaces."""
+    from iga_marketing_master_2.gui.main_window import count_tab_field_total
+
+    state = {
+        "fields": {},
+        "repeatables": {
+            "vehicle": [{"vehicle.year": {}}, {"vehicle.year": {}}, {}],
+            "location": [{}, {}],
+        },
+    }
+    assert count_tab_field_total(state, "vehicle") == 3
+    assert count_tab_field_total(state, "location") == 2
+    assert count_tab_field_total(state, "driver") == 0
+
+
+def test_count_low_confidence_in_tab_singleton() -> None:
+    from iga_marketing_master_2.gui.main_window import count_low_confidence_in_tab
+
+    state = {
+        "fields": {
+            # Below threshold and not approved → counted.
+            "policy.gl.aggregate_limit": {"confidence": 0.5, "status": "pending"},
+            # At threshold (0.85) → not counted.
+            "policy.gl.each_occurrence": {"confidence": 0.85, "status": "pending"},
+            # Approved → not counted regardless of confidence.
+            "policy.gl.deductible": {"confidence": 0.1, "status": "approved"},
+            # Different tab.
+            "policy.auto.combined_single_limit": {"confidence": 0.2, "status": "pending"},
+        },
+        "repeatables": {},
+    }
+    assert count_low_confidence_in_tab(state, "policy.gl") == 1
+    assert count_low_confidence_in_tab(state, "policy.auto") == 1
+    assert count_low_confidence_in_tab(state, "submission") == 0
+
+
+def test_count_low_confidence_in_tab_repeatable() -> None:
+    from iga_marketing_master_2.gui.main_window import count_low_confidence_in_tab
+
+    state = {
+        "fields": {},
+        "repeatables": {
+            "vehicle": [
+                {
+                    "vehicle.year": {"confidence": 0.4, "status": "pending"},
+                    "vehicle.make": {"confidence": 0.95, "status": "pending"},
+                },
+                {
+                    "vehicle.year": {"confidence": 0.3, "status": "pending"},
+                },
+            ],
+        },
+    }
+    assert count_low_confidence_in_tab(state, "vehicle") == 2
+
+
+def test_build_tab_label_formats() -> None:
+    from iga_marketing_master_2.gui.main_window import build_tab_label
+
+    state = {
+        "fields": {
+            "policy.gl.a": {"confidence": 0.9, "status": "approved"},
+            "policy.gl.b": {"confidence": 0.95, "status": "approved"},
+        },
+        "repeatables": {},
+    }
+    # All confident → just the count.
+    assert build_tab_label(state, "policy.gl") == "General Liability (2)"
+    # No fields at all → no badge.
+    assert build_tab_label(state, "policy.umbrella") == "Umbrella"
+    # Add one low-confidence field.
+    state["fields"]["policy.gl.c"] = {"confidence": 0.4, "status": "pending"}
+    assert build_tab_label(state, "policy.gl") == "General Liability (3 · 1!)"
+
+
+# ---------------------------------------------------------------------------
+# UX-pass #6 — recent-clients persistence
+# ---------------------------------------------------------------------------
+
+
+def test_update_recent_clients_dedupes_and_caps(tmp_path: Path) -> None:
+    from iga_marketing_master_2.gui.main_window import update_recent_clients
+
+    a = tmp_path / "a"
+    b = tmp_path / "b"
+    c = tmp_path / "c"
+    d = tmp_path / "d"
+    e = tmp_path / "e"
+    f = tmp_path / "f"
+    for p in (a, b, c, d, e, f):
+        p.mkdir()
+
+    out = update_recent_clients([], a)
+    assert out == [a]
+
+    # Adding the same path again moves it to the front (deduped).
+    out = update_recent_clients([b, c, a], a)
+    assert out[0] == a
+    assert out.count(a) == 1
+
+    # Cap at 5.
+    initial = [b, c, d, e, f]
+    out = update_recent_clients(initial, a)
+    assert len(out) == 5
+    assert out[0] == a
+
+
+def test_load_save_recent_clients_roundtrip(tmp_path: Path, monkeypatch) -> None:
+    """QSettings round-trip via an in-memory scope."""
+    from PySide6.QtCore import QSettings
+
+    from iga_marketing_master_2.gui.main_window import (
+        load_recent_clients,
+        save_recent_clients,
+    )
+
+    QSettings.setDefaultFormat(QSettings.Format.IniFormat)
+    QSettings.setPath(
+        QSettings.Format.IniFormat,
+        QSettings.Scope.UserScope,
+        str(tmp_path),
+    )
+    settings = QSettings("IGA-Test", "test_recent_clients")
+    settings.clear()
+
+    a = tmp_path / "ClientA"
+    b = tmp_path / "ClientB"
+    a.mkdir()
+    b.mkdir()
+    save_recent_clients(settings, [a, b])
+    loaded = load_recent_clients(settings)
+    assert [str(p) for p in loaded] == [str(a), str(b)]
+
+
+# ---------------------------------------------------------------------------
+# UX-pass #5 — humanize_seconds_ago
+# ---------------------------------------------------------------------------
+
+
+def test_humanize_seconds_ago_branches() -> None:
+    from iga_marketing_master_2.gui.main_window import humanize_seconds_ago
+
+    assert humanize_seconds_ago(0) == "just now"
+    assert humanize_seconds_ago(0.5) == "just now"
+    assert humanize_seconds_ago(15) == "15s ago"
+    assert humanize_seconds_ago(120) == "2m ago"
+    assert humanize_seconds_ago(7200) == "2h ago"
+    assert humanize_seconds_ago(2 * 86_400) == "2d ago"
+
+
+# ---------------------------------------------------------------------------
+# UX-pass #7 — bulk-action handler (pure state mutation)
+# ---------------------------------------------------------------------------
+
+
+def test_apply_bulk_action_approve_all() -> None:
+    from iga_marketing_master_2.gui.main_window import MainWindow
+
+    state = {
+        "fields": {
+            "policy.gl.a": {"value": "x", "status": "pending"},
+            "policy.gl.b": {"value": "y", "status": "pending"},
+            "policy.gl.c": {"value": "z", "status": "locked"},  # locked: skipped
+            "policy.auto.x": {"value": "q", "status": "pending"},
+        },
+        "repeatables": {},
+    }
+    affected = MainWindow._apply_bulk_action_to_state(state, "approve_all", "policy.gl")
+    assert affected == 2
+    assert state["fields"]["policy.gl.a"]["status"] == "approved"
+    assert state["fields"]["policy.gl.b"]["status"] == "approved"
+    assert state["fields"]["policy.gl.c"]["status"] == "locked"  # untouched
+    # Other tabs untouched.
+    assert state["fields"]["policy.auto.x"]["status"] == "pending"
+
+
+def test_apply_bulk_action_reject_all_clears_value() -> None:
+    from iga_marketing_master_2.gui.main_window import MainWindow
+
+    state = {
+        "fields": {
+            "policy.gl.a": {"value": "ACME", "status": "approved"},
+            "policy.gl.b": {"value": "1000", "status": "pending"},
+            "policy.gl.c": {"value": "z", "status": "locked"},
+        },
+        "repeatables": {},
+    }
+    affected = MainWindow._apply_bulk_action_to_state(state, "reject_all", "policy.gl")
+    assert affected == 2
+    assert state["fields"]["policy.gl.a"]["value"] is None
+    assert state["fields"]["policy.gl.a"]["status"] == "pending"
+    assert state["fields"]["policy.gl.c"]["value"] == "z"  # locked: skipped
+
+
+def test_apply_bulk_action_lock_all_approved() -> None:
+    from iga_marketing_master_2.gui.main_window import MainWindow
+
+    state = {
+        "fields": {
+            "policy.gl.a": {"value": "ACME", "status": "approved"},
+            "policy.gl.b": {"value": "B", "status": "pending"},
+            "policy.gl.c": {"value": "C", "status": "approved"},
+        },
+        "repeatables": {},
+    }
+    affected = MainWindow._apply_bulk_action_to_state(state, "lock_all_approved", "policy.gl")
+    assert affected == 2
+    assert state["fields"]["policy.gl.a"]["status"] == "locked"
+    assert state["fields"]["policy.gl.b"]["status"] == "pending"
+    assert state["fields"]["policy.gl.c"]["status"] == "locked"
+
+
+def test_apply_bulk_action_repeatable_group() -> None:
+    from iga_marketing_master_2.gui.main_window import MainWindow
+
+    state = {
+        "fields": {},
+        "repeatables": {
+            "vehicle": [
+                {
+                    "vehicle.year": {"value": 2020, "status": "pending"},
+                    "vehicle.make": {"value": "Ford", "status": "pending"},
+                },
+                {
+                    "vehicle.year": {"value": 2019, "status": "approved"},
+                },
+            ],
+        },
+    }
+    affected = MainWindow._apply_bulk_action_to_state(state, "approve_all", "vehicle")
+    # 2 pending + 1 already-approved (still "approved" → no change for it; only 2 transitions counted? No — "approve_all" sets status to approved unconditionally except for locked. So already-approved stays "approved" but the function still touches it.)
+    # Per implementation: _touch returns True for approve_all whenever status != locked.
+    assert affected == 3
+
+
+# ---------------------------------------------------------------------------
+# UX-pass #8 — find-bar substring filter
+# ---------------------------------------------------------------------------
+
+
+def test_find_bar_matches_query_helper() -> None:
+    from iga_marketing_master_2.gui.find_bar import matches_query
+
+    # Empty query matches everything.
+    assert matches_query("policy.gl.aggregate_limit", "") is True
+    # Case-insensitive substring.
+    assert matches_query("policy.gl.aggregate_limit", "agg") is True
+    assert matches_query("policy.gl.aggregate_limit", "AGG") is True
+    assert matches_query("policy.gl.aggregate_limit", "GL") is True
+    # No match.
+    assert matches_query("policy.gl.aggregate_limit", "umbrella") is False
+
+
+def test_find_bar_open_close_emits_signals(qapp) -> None:
+    from iga_marketing_master_2.gui.find_bar import FindBar
+
+    bar = FindBar()
+    closed_fires: list[None] = []
+    bar.closed.connect(lambda: closed_fires.append(None))
+
+    queries: list[str] = []
+    bar.query_changed.connect(lambda q: queries.append(q))
+
+    assert not bar.is_open()
+    bar.open()
+    assert bar.is_open()
+
+    bar._line_edit.setText("agg")
+    assert "agg" in queries
+
+    bar.close()
+    assert not bar.is_open()
+    assert closed_fires  # at least one closed signal
+
+
+# ---------------------------------------------------------------------------
+# UX-pass #9 — low-confidence row predicate + combined filter
+# ---------------------------------------------------------------------------
+
+
+def test_is_low_confidence_row_predicate() -> None:
+    from iga_marketing_master_2.gui.section_table import (
+        FieldRow,
+        is_low_confidence_row,
+    )
+
+    # Pending → always visible.
+    pending = FieldRow(
+        domain_tag="x.y", label="Y", value=None, confidence=0.99, status="pending"
+    )
+    assert is_low_confidence_row(pending) is True
+
+    # Approved + high confidence → hidden.
+    approved_high = FieldRow(
+        domain_tag="x.y", label="Y", value="v", confidence=0.95, status="approved"
+    )
+    assert is_low_confidence_row(approved_high) is False
+
+    # Approved + low confidence → still visible (operator may want to revisit).
+    approved_low = FieldRow(
+        domain_tag="x.y", label="Y", value="v", confidence=0.5, status="approved"
+    )
+    assert is_low_confidence_row(approved_low) is True
+
+    # Has conflicts → always visible.
+    with_conflicts = FieldRow(
+        domain_tag="x.y",
+        label="Y",
+        value="v",
+        confidence=1.0,
+        status="approved",
+        has_conflicts=True,
+    )
+    assert is_low_confidence_row(with_conflicts) is True
+
+
+def test_row_visible_under_filters_combines_both() -> None:
+    from iga_marketing_master_2.gui.section_table import (
+        FieldRow,
+        row_visible_under_filters,
+    )
+
+    row = FieldRow(
+        domain_tag="policy.gl.aggregate_limit",
+        label="Aggregate",
+        value=1000,
+        confidence=0.95,
+        status="approved",
+    )
+    # No filters → visible.
+    assert row_visible_under_filters(row) is True
+    # find_query that matches → visible.
+    assert row_visible_under_filters(row, find_query="agg") is True
+    # find_query that doesn't match → hidden.
+    assert row_visible_under_filters(row, find_query="umbrella") is False
+    # Low-confidence filter ON + this is high-confidence + approved → hidden.
+    assert row_visible_under_filters(row, low_confidence_only=True) is False
+    # If both filters active and row matches the query but is high-conf+approved:
+    assert row_visible_under_filters(row, find_query="agg", low_confidence_only=True) is False
+
+
+def test_apply_row_visibility_on_view(qapp) -> None:
+    from iga_marketing_master_2.gui.section_table import (
+        FieldRow,
+        SectionTableModel,
+        SectionTableView,
+    )
+
+    rows = [
+        FieldRow(
+            domain_tag="policy.gl.aggregate_limit",
+            label="A",
+            value=1000,
+            confidence=0.5,
+            status="pending",
+        ),
+        FieldRow(
+            domain_tag="policy.auto.csl",
+            label="B",
+            value=500,
+            confidence=0.95,
+            status="approved",
+        ),
+    ]
+    model = SectionTableModel(rows)
+    view = SectionTableView()
+    view.setModel(model)
+
+    # No filter — both rows visible.
+    visible = view.apply_row_visibility()
+    assert visible == 2
+    assert not view.isRowHidden(0)
+    assert not view.isRowHidden(1)
+
+    # Substring filter "auto" hides the GL row.
+    visible = view.apply_row_visibility(find_query="auto")
+    assert visible == 1
+    assert view.isRowHidden(0)
+    assert not view.isRowHidden(1)
+
+    # Low-conf-only hides the approved high-confidence row.
+    visible = view.apply_row_visibility(low_confidence_only=True)
+    assert visible == 1
+    assert not view.isRowHidden(0)
+    assert view.isRowHidden(1)
+
+
+# ---------------------------------------------------------------------------
+# UX-pass #7 — BulkActionBar widget
+# ---------------------------------------------------------------------------
+
+
+def test_bulk_action_bar_emits_action_signals(qapp) -> None:
+    from iga_marketing_master_2.gui.section_table import BulkActionBar
+
+    bar = BulkActionBar()
+    actions: list[str] = []
+    bar.action_requested.connect(lambda kind: actions.append(kind))
+
+    bar._approve_btn.click()
+    bar._reject_btn.click()
+    bar._lock_btn.click()
+    assert actions == ["approve_all", "reject_all", "lock_all_approved"]
+
+
+# ---------------------------------------------------------------------------
+# UX-pass #10 — welcome pane construction
+# ---------------------------------------------------------------------------
+
+
+def test_welcome_pane_constructs_and_renders_text(qapp) -> None:
+    from iga_marketing_master_2.gui.welcome_pane import WelcomePane
+
+    pane = WelcomePane()
+    # Walk for the QLabel; assert it has the welcome headline.
+    from PySide6.QtWidgets import QLabel
+
+    labels = pane.findChildren(QLabel)
+    text_blob = " ".join(label.text() for label in labels)
+    assert "Welcome to IGA Marketing Master 2.0" in text_blob
+    assert "Ctrl+O" in text_blob

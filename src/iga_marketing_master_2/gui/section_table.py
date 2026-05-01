@@ -41,7 +41,9 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDateEdit,
+    QHBoxLayout,
     QLineEdit,
+    QPushButton,
     QStyledItemDelegate,
     QStyleOptionViewItem,
     QTableView,
@@ -51,6 +53,7 @@ from PySide6.QtWidgets import (
 from ..logger import get_logger
 
 __all__ = [
+    "BulkActionBar",
     "CONFIDENCE_HIGH_THRESHOLD",
     "CONFIDENCE_LOW_THRESHOLD",
     "FieldRow",
@@ -60,6 +63,8 @@ __all__ = [
     "SectionTableModel",
     "SectionTableView",
     "confidence_color",
+    "is_low_confidence_row",
+    "row_visible_under_filters",
 ]
 
 
@@ -596,3 +601,114 @@ class SectionTableView(QTableView):
         rows = model.rows()
         if 0 <= current.row() < len(rows):
             self.focus_changed.emit(rows[current.row()].domain_tag)
+
+    def apply_row_visibility(
+        self,
+        *,
+        find_query: str = "",
+        low_confidence_only: bool = False,
+    ) -> int:
+        """Hide rows that don't match the active filters; return visible count.
+
+        Pure-presentation operation — does not mutate the model.
+        See :func:`row_visible_under_filters` for the per-row predicate.
+        """
+        model = self.model()
+        if not isinstance(model, SectionTableModel):
+            return 0
+        visible = 0
+        for row_idx, row in enumerate(model.rows()):
+            visible_now = row_visible_under_filters(
+                row,
+                find_query=find_query,
+                low_confidence_only=low_confidence_only,
+            )
+            self.setRowHidden(row_idx, not visible_now)
+            if visible_now:
+                visible += 1
+        return visible
+
+
+# ---------------------------------------------------------------------------
+# Filter helpers (pure functions — easy to unit-test)
+# ---------------------------------------------------------------------------
+
+
+def is_low_confidence_row(row: FieldRow) -> bool:
+    """Return True if ``row`` should be visible when "low-confidence only" is on.
+
+    Per UX-pass spec #9: hide rows where ``confidence >= CONFIDENCE_HIGH_THRESHOLD``
+    AND ``status != "pending"``. The row is "interesting" (visible) when
+    confidence is below the high threshold OR the operator hasn't acted on it
+    yet (status == "pending"), OR it has unresolved conflicts.
+    """
+    if row.has_conflicts:
+        return True
+    if row.status == "pending":
+        return True
+    if row.confidence < CONFIDENCE_HIGH_THRESHOLD:
+        return True
+    return False
+
+
+def row_visible_under_filters(
+    row: FieldRow,
+    *,
+    find_query: str = "",
+    low_confidence_only: bool = False,
+) -> bool:
+    """Combine the find-bar substring filter and the low-confidence filter.
+
+    Pure function. Empty ``find_query`` means "no substring filter".
+    """
+    if find_query:
+        if find_query.strip().lower() not in row.domain_tag.lower():
+            return False
+    if low_confidence_only and not is_low_confidence_row(row):
+        return False
+    return True
+
+
+# ---------------------------------------------------------------------------
+# BulkActionBar — small toolbar at the top of each section
+# ---------------------------------------------------------------------------
+
+
+class BulkActionBar(QWidget):
+    """Three-button bar: Approve All / Reject All / Lock All Approved.
+
+    The bar emits a single :attr:`action_requested` signal carrying one of
+    ``"approve_all"``, ``"reject_all"``, or ``"lock_all_approved"``. The
+    host main window resolves the active section's tab key and dispatches.
+
+    Decoupled from the model so the same bar can sit above singleton
+    section tables and the form pane in :class:`RepeatablePane`.
+    """
+
+    action_requested = Signal(str)
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(4, 2, 4, 2)
+        layout.setSpacing(6)
+
+        self._approve_btn = QPushButton("Approve All", self)
+        self._approve_btn.setToolTip("Mark every visible field in this section as approved.")
+        self._approve_btn.clicked.connect(lambda: self.action_requested.emit("approve_all"))
+        layout.addWidget(self._approve_btn)
+
+        self._reject_btn = QPushButton("Reject All", self)
+        self._reject_btn.setToolTip("Clear every visible field in this section back to pending.")
+        self._reject_btn.clicked.connect(lambda: self.action_requested.emit("reject_all"))
+        layout.addWidget(self._reject_btn)
+
+        self._lock_btn = QPushButton("Lock All Approved", self)
+        self._lock_btn.setToolTip(
+            "Lock every approved field so it can't be re-edited. "
+            "Use after a final review pass."
+        )
+        self._lock_btn.clicked.connect(lambda: self.action_requested.emit("lock_all_approved"))
+        layout.addWidget(self._lock_btn)
+
+        layout.addStretch(1)
