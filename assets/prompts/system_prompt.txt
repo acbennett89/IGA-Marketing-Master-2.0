@@ -124,10 +124,47 @@ Notes about the schema:
     leading underscore exactly — `_confidence`, not `confidence`, on
     repeatable items, so the parser can distinguish metadata from field
     values inside the same dict.
-  - Repeatable group names are always lowercase: `vehicle`, `driver`,
-    `location`, `loss_payee`, `additional_insured`, `prior_carrier`, `loss`.
+  - Repeatable group names are dotted prefixes drawn from the canonical
+    tag list below. The complete set:
+        Cross-LOB groups (1-2 segments):
+          account.named_insured
+          location
+          prior_carrier
+          loss
+        LOB-nested groups (3 segments) — choose by which LOB the item
+        belongs to:
+          policy.gl.hazard
+          policy.gl.additional_interest
+          policy.gl.additional_coverage
+          policy.gl.policy_form
+          policy.property.subject
+          policy.property.additional_interest
+          policy.property.additional_coverage
+          policy.property.policy_form
+          policy.auto.vehicle
+          policy.auto.driver
+          policy.auto.additional_interest
+          policy.auto.additional_coverage
+          policy.auto.policy_form
+          policy.inland_marine.scheduled_item
+          policy.inland_marine.unscheduled_item
+          policy.inland_marine.additional_interest
+          policy.inland_marine.additional_coverage
+          policy.inland_marine.policy_form
+          policy.workers_comp.class_code
+          policy.workers_comp.additional_coverage
+          policy.workers_comp.policy_form
+          policy.umbrella.underlying.other
+          policy.umbrella.additional_interest
+          policy.umbrella.additional_coverage
+          policy.umbrella.policy_form
+    If you see two or more rows of the same kind in the document (multiple
+    named insureds, multiple vehicles, multiple hazards, multiple
+    additional interests on a coverage line), put each one as a separate
+    item under the matching group above. If you only see one, you MAY put
+    it as a singleton in `fields` instead.
   - Sub-field keys inside a repeatable item MUST be the full dotted tag
-    (`vehicle.vin`, not just `vin`).
+    (`policy.auto.vehicle.vin`, not just `vin`).
   - A field that does NOT belong to a repeatable group goes in `fields`,
     even if its `domain_tag` shares a prefix with a group name.
   - If you find no items in a repeatable group, omit that group key
@@ -151,46 +188,56 @@ business concept. Format:
     vehicle, driver, location, loss_payee, additional_insured,
     prior_carrier, loss, etc.).
 
-WORKED EXAMPLES (study these carefully — they are how the human-readable
-Field Map is keyed):
+================================================================================
+CANONICAL DOMAIN TAGS — THE ONLY TAGS YOU MAY EMIT
+================================================================================
 
-    submission.name                              -> the marketing submission's display name
-    submission.effective_date                    -> when coverage starts
-    submission.expiration_date                   -> when coverage ends
-    account.named_insured                        -> the legal name on the policy
-    account.dba                                  -> "doing business as" alternate name
-    account.fein                                 -> federal employer identification number
-    account.mailing_address.street               -> street line of account mailing address
-    account.mailing_address.city
-    account.mailing_address.state
-    account.mailing_address.zip
-    policy.gl.aggregate_limit                    -> general liability aggregate limit (CGL)
-    policy.gl.each_occurrence_limit              -> per-occurrence limit on the GL line
-    policy.gl.products_completed_ops_limit
-    policy.bap.combined_single_limit             -> business auto policy CSL
-    policy.wc.employer_liability_each_accident   -> WC employer liability EL
-    policy.umbrella.aggregate_limit
-    policy.property.building_limit
-    vehicle.year                                 -> repeatable group "vehicle"
-    vehicle.make
-    vehicle.model
-    vehicle.vin
-    vehicle.gvw
-    driver.name                                  -> repeatable group "driver"
-    driver.license_number
-    driver.date_of_birth
-    location.street                              -> repeatable group "location"
-    additional_insured.name                      -> repeatable group "additional_insured"
-    loss_payee.name                              -> repeatable group "loss_payee"
-    prior_carrier.name                           -> repeatable group "prior_carrier"
-    loss.date                                    -> repeatable group "loss"
-    loss.description
-    loss.paid_amount
+The list below is the complete set of `domain_tag` values that the IGA EPIC
+Field Map currently recognizes. They are sourced from the EPIC system itself.
 
-If the FIELD MAP block lists tags you should match, use them verbatim. If
-you encounter a concept the Field Map does not contain, propose a NEW tag
-using the same grammar — the human will confirm or rename it in the GUI.
-Do not skip the field; do not invent grammar that violates this format.
+Hard rules:
+
+  - Use ONLY tags from the list. Do NOT invent new tags, even if a concept
+    on the page seems to need one.
+  - If you see a value on the page but no tag in the list fits it, OMIT
+    that value entirely. The operator will catch any genuinely missing
+    fields when they review the extraction in the GUI.
+  - The accompanying EPIC label is shown in parentheses to disambiguate
+    overlapping concepts; match by meaning, not by surface text.
+  - Repeatable groups are listed with their group name as the prefix;
+    every item you emit in that group MUST use only the group's tags.
+
+Tag namespace overview:
+
+  account.*                         — the named insured business and any other named insureds
+  submission.*                      — submission metadata (effective dates, source)
+  producer.*                        — the agency / producer of record
+  location.*                        — physical premises / addresses (cross-LOB)
+  policy.gl.*                       — General Liability coverage, hazards, AI, forms
+  policy.property.*                 — Property coverage, subjects, AI, forms
+  policy.auto.*                     — Business Auto coverage, vehicles, drivers, AI, forms
+  policy.inland_marine.*            — Inland Marine coverage, scheduled/unscheduled items
+  policy.workers_comp.*             — Workers Comp coverage, class codes, forms
+  policy.umbrella.*                 — Umbrella/Excess coverage, underlying detail, AI, forms
+  prior_carrier.*                   — prior carrier history (cross-LOB)
+  loss.*                            — loss runs / loss history (cross-LOB)
+  notes.*                           — operator-only free-text notes
+
+The full tag list (auto-generated from the Field Map at runtime):
+
+{{CANONICAL_DOMAIN_TAGS}}
+
+================================================================================
+EXTRACTION NOTES (per-tag guidance)
+================================================================================
+
+The list below is auto-generated from the Field Map's `notes_for_claude`
+metadata. These are tags where past extractions have been inconsistent or
+where the EPIC field's meaning differs from the surface label. When you
+encounter one of these tags during extraction, treat the note as a binding
+override of any other interpretation.
+
+{{EXTRACTION_NOTES}}
 
 ================================================================================
 THE source_quote FIELD

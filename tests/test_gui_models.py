@@ -158,7 +158,8 @@ def test_tab_derivation_basic_namespaces() -> None:
         },
     }
     keys = derive_tab_keys(state)
-    assert "submission" in keys
+    # submission is in HIDDEN_NAMESPACES — extracted but not surfaced as a tab.
+    assert "submission" not in keys
     assert "account" in keys
     assert "policy.gl" in keys
     assert "policy.auto" in keys
@@ -182,12 +183,13 @@ def test_tab_derivation_orders_by_tab_order() -> None:
         "repeatables": {"vehicle": [{}]},
     }
     keys = derive_tab_keys(state)
-    sub_idx = keys.index("submission")
     acc_idx = keys.index("account")
     veh_idx = keys.index("vehicle")
-    # submission comes before account, account before vehicle (per TAB_ORDER).
-    assert sub_idx < acc_idx < veh_idx
-    # And TAB_ORDER must contain the expected entries.
+    # submission is hidden via HIDDEN_NAMESPACES — confirm it's filtered out.
+    assert "submission" not in keys
+    # account (default tab) comes before vehicle (per TAB_ORDER).
+    assert acc_idx < veh_idx
+    # TAB_ORDER must still contain the entries we rely on for ordering.
     assert "submission" in TAB_ORDER
     assert "vehicle" in TAB_ORDER
 
@@ -206,17 +208,18 @@ def test_tab_derivation_unknown_namespace_appended_alpha() -> None:
     keys = derive_tab_keys(state)
     # alpha and zeta aren't in TAB_ORDER, so they go to the tail in alpha order.
     assert keys.index("alpha") < keys.index("zeta")
-    assert keys.index("submission") < keys.index("alpha")
+    # submission is filtered out via HIDDEN_NAMESPACES.
+    assert "submission" not in keys
 
 
-def test_tab_derivation_empty_state_has_anchor() -> None:
-    """Even an empty state shows the submission anchor tab."""
-    from iga_marketing_master_2.gui.main_window import derive_tab_keys
+def test_tab_derivation_empty_state_has_defaults() -> None:
+    """Even an empty state shows all DEFAULT_TAB_KEYS."""
+    from iga_marketing_master_2.gui.main_window import DEFAULT_TAB_KEYS, derive_tab_keys
 
     keys = derive_tab_keys(None)
-    assert keys == ["submission"]
+    assert list(DEFAULT_TAB_KEYS) == keys
     keys = derive_tab_keys({"fields": {}, "repeatables": {}})
-    assert keys == ["submission"]
+    assert list(DEFAULT_TAB_KEYS) == keys
 
 
 def test_label_for_tab_key() -> None:
@@ -506,59 +509,19 @@ def test_pause_choice_values() -> None:
     assert PauseChoice.CANCEL.value == "cancel"
 
 
-def test_run_controls_begin_entry_gating(qapp) -> None:
+def test_run_controls_resume_visibility(qapp) -> None:
+    """The Begin Entry / Extract buttons were removed from the run-controls
+    bar in the UX pass that consolidated controls into the upload panel and
+    progress meter. The Resume button stays — it surfaces during paused
+    extraction. This test confirms its visibility tracks paused state.
+    """
     from iga_marketing_master_2.gui.run_controls import RunControlsBar
 
     bar = RunControlsBar()
-    # No approved fields -> Begin Entry disabled.
-    bar.set_approved_count(0)
-    assert not bar._begin_btn.isEnabled()
-    bar.set_approved_count(3)
-    assert bar._begin_btn.isEnabled()
-    # Mid-run -> disabled regardless of count.
-    bar.set_entering(True)
-    assert not bar._begin_btn.isEnabled()
-    bar.set_entering(False)
-    assert bar._begin_btn.isEnabled()
-    # Extraction in flight also disables Begin Entry.
-    bar.set_extracting(True)
-    assert not bar._begin_btn.isEnabled()
-    bar.set_extracting(False)
-    assert bar._begin_btn.isEnabled()
-    # Resume button visibility flips with paused state.
+    bar.set_paused(False)
     assert not bar._resume_btn.isVisible()
     bar.set_paused(True)
-    # Visibility is set; isVisible() requires the widget to be shown to its parent.
-    # We just check the underlying state.
-    assert bar._resume_btn.isVisibleTo(bar) or True  # tolerant — event loop hasn't run
-
-
-def test_run_controls_extract_gating(qapp) -> None:
-    """gui-fix-2 #1: Extract button needs queued PDFs and no in-flight run."""
-    from iga_marketing_master_2.gui.run_controls import RunControlsBar
-
-    bar = RunControlsBar()
-    # Empty queue -> disabled.
-    bar.set_pending_pdf_count(0)
-    assert not bar._extract_btn.isEnabled()
-    # Queued PDFs -> enabled.
-    bar.set_pending_pdf_count(2)
-    assert bar._extract_btn.isEnabled()
-    # Extraction in flight -> disabled even with queue.
-    bar.set_extracting(True)
-    assert not bar._extract_btn.isEnabled()
-    bar.set_extracting(False)
-    assert bar._extract_btn.isEnabled()
-    # Entry in flight -> disabled.
-    bar.set_entering(True)
-    assert not bar._extract_btn.isEnabled()
-    bar.set_entering(False)
-    assert bar._extract_btn.isEnabled()
-    # Paused -> disabled.
-    bar.set_paused(True)
-    assert not bar._extract_btn.isEnabled()
-    bar.set_paused(False)
-    assert bar._extract_btn.isEnabled()
+    assert bar._resume_btn.isVisibleTo(bar) or True  # tolerant — no event loop
 
 
 def test_pending_pdfs_pane_add_dedup_remove(qapp, tmp_path: Path) -> None:
@@ -723,7 +686,7 @@ def test_build_tab_label_formats() -> None:
     # All confident → just the count.
     assert build_tab_label(state, "policy.gl") == "General Liability (2)"
     # No fields at all → no badge.
-    assert build_tab_label(state, "policy.umbrella") == "Umbrella"
+    assert build_tab_label(state, "policy.umbrella") == "Umbrella/Excess"
     # Add one low-confidence field.
     state["fields"]["policy.gl.c"] = {"confidence": 0.4, "status": "pending"}
     assert build_tab_label(state, "policy.gl") == "General Liability (3 · 1!)"

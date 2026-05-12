@@ -250,8 +250,26 @@ def fake_anthropic(monkeypatch: pytest.MonkeyPatch):
 
     Tests can configure ``client_instance.messages.create.return_value`` or
     ``side_effect`` per scenario.
+
+    Production code calls ``client.messages.stream(**req)`` (context
+    manager) instead of ``messages.create``, but tests mock ``create`` for
+    historical reasons. We bridge stream → create here so call_count,
+    call_args, side_effect, and return_value on ``messages.create`` all
+    keep working without rewriting every test.
     """
     client_instance = MagicMock(name="anthropic_client")
+
+    def _stream_shim(**kwargs):
+        msg = client_instance.messages.create(**kwargs)
+        ctx = MagicMock(name="stream_ctx")
+        stream_obj = MagicMock(name="stream_obj")
+        stream_obj.get_final_message.return_value = msg
+        ctx.__enter__.return_value = stream_obj
+        ctx.__exit__.return_value = False
+        return ctx
+
+    client_instance.messages.stream.side_effect = _stream_shim
+
     factory = MagicMock(name="anthropic_factory", return_value=client_instance)
     monkeypatch.setattr(
         "iga_marketing_master_2.claude_client.anthropic.Anthropic", factory

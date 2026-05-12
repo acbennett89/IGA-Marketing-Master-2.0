@@ -42,6 +42,7 @@ from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
 import anthropic
+import httpx
 import pypdf
 
 from . import field_map as field_map_mod  # FieldMap protocol satisfied by field_map module
@@ -72,13 +73,14 @@ __all__ = [
 # ----- Module-level constants (per ARCHITECTURE.md Appendix A) ----------------
 
 CONFIDENCE_LOW_THRESHOLD: float = 0.7
+ESCALATION_ENABLED: bool = False  # Opus auto-escalation; disable to run Sonnet-only
 MAX_PAGES_PER_CALL: int = 80
 MAX_BYTES_PER_CALL: int = 32 * 1024 * 1024  # Anthropic 32 MB ceiling
 PAGE_OVERLAP: int = 1
 DEFAULT_SONNET_MODEL: str = "claude-sonnet-4-6"
 DEFAULT_OPUS_MODEL: str = "claude-opus-4-7"
 RETRY_BACKOFF_SECONDS: tuple[int, ...] = (1, 2, 4, 8)
-MAX_TOKENS_PER_CALL: int = 16_384
+MAX_TOKENS_PER_CALL: int = 32_000
 
 # Sonnet 4.6 cache breakpoint minimum (RESEARCH.md Finding 5)
 SONNET_CACHE_MIN_TOKENS: int = 2_048
@@ -797,7 +799,11 @@ def _create_message_with_retry(
             attempt + 1,
         )
         try:
-            response = client.messages.create(**request)
+            # Streaming is required by Anthropic for max_tokens > ~21K and
+            # also avoids client-side timeouts on long responses. We just
+            # want the final assembled Message — same shape as create().
+            with client.messages.stream(**request) as stream:
+                response = stream.get_final_message()
         except anthropic.AnthropicError as raw:
             classified = _classify_anthropic_error(raw)
             last_classified = classified
@@ -816,6 +822,29 @@ def _create_message_with_retry(
                 len(backoffs) + 1,
                 delay,
                 classified.__class__.__name__,
+            )
+            time.sleep(delay)
+            continue
+        except httpx.HTTPError as raw:
+            # Transport-level errors during streaming sometimes escape the
+            # Anthropic SDK wrapper unwrapped — most often
+            # httpx.RemoteProtocolError ("peer closed connection without
+            # sending complete message body") on long responses. Treat these
+            # as transient and retry just like 5xx/rate-limit errors.
+            classified = ClaudeServerError(
+                f"{type(raw).__name__}: {raw}"
+            )
+            last_classified = classified
+            if attempt >= len(backoffs):
+                raise classified from raw
+            delay = backoffs[attempt]
+            logger.warning(
+                "claude.retry attempt=%d/%d delay=%ds error=%s detail=%s",
+                attempt + 1,
+                len(backoffs) + 1,
+                delay,
+                type(raw).__name__,
+                str(raw)[:160],
             )
             time.sleep(delay)
             continue
@@ -1508,6 +1537,9 @@ def extract_from_pdf(
             aggregate_usage,
         )
 
+    if not ESCALATION_ENABLED:
+        return _attach_usage(first_pass, aggregate_usage)
+
     # Two-pass escalation: Sonnet is fast and cheap, but Opus catches the
     # fields Sonnet flagged as low-confidence / missing-required. We only
     # rerun Opus on those specific fields — full re-extraction would burn
@@ -1533,10 +1565,8 @@ def extract_from_pdf(
     )
     aggregate_usage.add(opus_usage)
 
-    return _attach_usage(
-        _merge_first_pass_with_opus(first_pass, opus_records),
-        aggregate_usage,
-    )
+    merged = _merge_first_pass_with_opus(first_pass, opus_records)
+    return _attach_usage(_drop_orphan_singletons(merged), aggregate_usage)
 
 
 def reextract_low_confidence_fields(
@@ -1708,11 +1738,27 @@ def _merge_first_pass_with_opus(
         _record_dedup_key(r): r for r in sonnet
     }
     for r in opus:
-        by_key[_record_dedup_key(r)] = r
+        key = _record_dedup_key(r)
+        existing = by_key.get(key)
+        if existing is None or r.confidence > existing.confidence:
+            by_key[key] = r
     return sorted(
         by_key.values(),
         key=lambda r: (r.domain_tag, r.repeatable_group or "", r.repeatable_index or 0),
     )
+
+
+def _drop_orphan_singletons(records: list[ExtractedField]) -> list[ExtractedField]:
+    """Remove singleton records whose domain_tag also appears as a repeatable.
+
+    When Opus re-extracts escalated fields it sometimes loses the
+    repeatable_group context, emitting vehicle/driver/etc. tags as bare
+    singletons. Those would duplicate the repeatable data already present
+    from the Sonnet pass. Drop any record where repeatable_group is None
+    but the same domain_tag is carried by at least one repeatable record.
+    """
+    repeatable_tags: set[str] = {r.domain_tag for r in records if r.repeatable_group is not None}
+    return [r for r in records if not (r.repeatable_group is None and r.domain_tag in repeatable_tags)]
 
 
 def _with_model(rec: ExtractedField, model: str) -> ExtractedField:

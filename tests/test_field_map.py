@@ -155,12 +155,21 @@ def test_fields_for_screen_includes_tab_and_subtab_fields(
 # --------------------------------------------------------------------------- #
 
 
-def test_generate_domain_tag_enum_empty_when_no_tags(
+def test_generate_domain_tag_enum_returns_sorted_unique_canonical_tags(
     loaded: FieldMap,
 ) -> None:
-    """The real scrape has no domain_tags yet; the enum starts empty."""
+    """The live Field Map has been progressively annotated; the enum should
+    return the sorted, unique set of currently-verified domain_tags. We
+    don't pin the count (it grows) — we assert sortedness, uniqueness, and
+    presence of a stable anchor tag we know is verified.
+    """
     enum = fm.generate_domain_tag_enum(loaded)
-    assert enum == []
+    assert enum == sorted(enum)
+    assert len(enum) == len(set(enum))
+    # If any tags are present, the canonical NI primary name is one we
+    # have explicitly verified — guard against a silent regression.
+    if enum:
+        assert "account.named_insured.name" in enum
 
 
 def test_generate_domain_tag_enum_after_updates_is_sorted_unique(
@@ -185,11 +194,17 @@ def test_generate_domain_tag_enum_after_updates_is_sorted_unique(
         patch={"domain_tag": "submission.expiration_date"},
     )
     enum = fm.generate_domain_tag_enum(loaded)
-    assert enum == [
+    # The fixture loads the live Field Map (which has many pre-verified
+    # tags). After three new updates, all three new tags must be present,
+    # the result must be sorted, and entries must be unique.
+    assert enum == sorted(enum)
+    assert len(enum) == len(set(enum))
+    for expected in (
+        "submission.name",
         "submission.effective_date",
         "submission.expiration_date",
-        "submission.name",
-    ]
+    ):
+        assert expected in enum
 
 
 def test_generate_domain_tag_enum_skips_aliases(loaded: FieldMap) -> None:
@@ -203,8 +218,10 @@ def test_generate_domain_tag_enum_skips_aliases(loaded: FieldMap) -> None:
         },
     )
     enum = fm.generate_domain_tag_enum(loaded)
-    # Only the primary appears.
-    assert enum == ["submission.name"]
+    # Primary appears; the alias tags are excluded entirely.
+    assert "submission.name" in enum
+    assert "submission.display_name" not in enum
+    assert "marketing.submission.name" not in enum
 
 
 # --------------------------------------------------------------------------- #
@@ -507,10 +524,12 @@ def test_field_map_instance_generate_domain_tag_enum(loaded: FieldMap) -> None:
     via_method = loaded.generate_domain_tag_enum()
     via_module = fm.generate_domain_tag_enum(loaded)
     assert via_method == via_module
-    assert via_method == [
-        "submission.effective_date",
-        "submission.name",
-    ]
+    # The fixture loads the live Field Map with many pre-verified tags;
+    # the regression we guard against is the AttributeError path silently
+    # returning []. As long as the method matches the module helper and the
+    # two new tags are present, the bug stays fixed.
+    assert "submission.name" in via_method
+    assert "submission.effective_date" in via_method
 
 
 def test_field_map_instance_screens_touched_by_domain_tags(

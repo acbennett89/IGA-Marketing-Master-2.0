@@ -1,17 +1,18 @@
 ' ============================================================
-' Launcher (Debug).vbs -- IGA Marketing Master 2.0
+' Launcher (Debug - No Fresh).vbs -- IGA Marketing Master 2.0
 ' ------------------------------------------------------------
-' Same as Launcher.vbs (auto-bootstrap on first run, silent
-' GUI launch after) but launches in DEBUG + FRESH-CLIENT mode:
+' Same as Launcher (Debug).vbs but WITHOUT --fresh, so the
+' existing diagnostic client state is preserved across runs:
 '
 '     1. --debug: verbose logs, raw Claude request/response,
 '        Playwright trace.zip + screenshots per entry action
-'     2. --fresh: wipes the diagnostic client folder before
-'        every launch -- "each test from scratch" iteration
-'     3. --client _DIAGNOSTIC: auto-selects the diagnostic
+'     2. --client _DIAGNOSTIC: auto-selects the diagnostic
 '        client (skips the picker)
-'     4. --working-library: points at the in-repo diagnostic
+'     3. --working-library: points at the in-repo diagnostic
 '        workspace under "Testing and Example Library"
+'
+' Use this launcher when iterating on GUI / review behaviour
+' without re-running extraction each time.
 '
 ' Debug artifacts live under <Working Library>\<Client>\debug\
 ' and are auto-pruned to the last 5 runs per client.
@@ -38,7 +39,7 @@ queuePdfs  = projRoot & "\Testing and Example Library\diagnostic_inputs"
 '   Q = a literal double-quote (VBS embeds " as "" inside string literals)
 Dim Q : Q = """"
 cmd = Q & pythonw & Q & " -m iga_marketing_master_2.cli" & _
-      " --debug --fresh --client _DIAGNOSTIC" & _
+      " --debug --client _DIAGNOSTIC" & _
       " --working-library " & Q & workingLib & Q & _
       " --queue-pdfs "      & Q & queuePdfs  & Q
 

@@ -66,6 +66,26 @@ def build_parser() -> argparse.ArgumentParser:
         help="Auto-select a client folder on launch (skips the picker).",
     )
     parser.add_argument(
+        "--fresh",
+        action="store_true",
+        help=(
+            "Wipe the --client folder (state.json, snapshots, debug, "
+            "pending_extraction) before launching the GUI. Use this for "
+            "fast 'each test from scratch' iteration. Requires --client."
+        ),
+    )
+    parser.add_argument(
+        "--queue-pdfs",
+        metavar="PATH",
+        type=str,
+        default=None,
+        help=(
+            "Pre-populate the upload queue with every PDF found at PATH "
+            "(non-recursive). Useful with --fresh for iterative testing "
+            "against a fixed corpus."
+        ),
+    )
+    parser.add_argument(
         "--version",
         action="version",
         version=f"iga-marketing-master-2 {__version__}",
@@ -89,6 +109,8 @@ def settings_from_args(args: argparse.Namespace) -> Settings:
         overrides["working_library"] = Path(args.working_library)
     if args.client:
         overrides["cli_initial_client"] = args.client
+    if getattr(args, "queue_pdfs", None):
+        overrides["cli_queue_pdfs"] = Path(args.queue_pdfs)
     return load_settings(cli_overrides=overrides)
 
 
@@ -107,6 +129,35 @@ def main(argv: Sequence[str] | None = None) -> int:
     if settings.debug:
         logger.debug("settings: %s", settings_as_dict(settings))
 
+    # --fresh: reset extraction state before the GUI loads.
+    # Deletes state.json, state.json.bak, pending_extraction, snapshots/, and
+    # debug/ — but leaves everything else in the client folder intact (e.g.
+    # manually-placed comparison snapshots like state.pre-dedup-fix.json).
+    if getattr(args, "fresh", False):
+        if not args.client:
+            sys.stderr.write("--fresh requires --client NAME\n")
+            return 2
+        import shutil
+        target = settings.working_library / args.client
+        if target.exists():
+            _fresh_targets = [
+                target / "state.json",
+                target / "state.json.bak",
+                target / "pending_extraction",
+                target / "snapshots",
+                target / "debug",
+            ]
+            for p in _fresh_targets:
+                if p.is_dir():
+                    shutil.rmtree(p, ignore_errors=True)
+                    logger.info("--fresh: removed dir %s", p)
+                elif p.exists():
+                    p.unlink(missing_ok=True)
+                    logger.info("--fresh: removed file %s", p)
+            sys.stderr.write(f"--fresh: reset extraction state in {target}\n")
+        else:
+            logger.info("--fresh: no folder to wipe at %s", target)
+
     # Deferred import so test harnesses can exercise CLI parsing without
     # paying the PySide6 import cost (and without crashing in environments
     # where PySide6 / Qt platform plugins aren't available).
@@ -122,7 +173,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 2
 
     try:
-        exit_code = IgaApp.run(debug=settings.debug)
+        exit_code = IgaApp.run(debug=settings.debug, settings=settings)
     except Exception:  # noqa: BLE001 — top-level safety net
         # Last line of defense: anything that escapes the GUI loop is logged
         # with traceback and translated to a non-zero exit instead of dumping

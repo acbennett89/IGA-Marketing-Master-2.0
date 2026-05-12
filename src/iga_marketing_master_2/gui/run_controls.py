@@ -70,24 +70,16 @@ class RunControlsBar(QWidget):
             "Escalate the next extraction call to Claude Opus 4.7 for higher accuracy."
         )
         self._force_opus_check.toggled.connect(self.force_opus_toggled)
+        self._force_opus_check.setVisible(False)
         layout.addWidget(self._force_opus_check)
 
-        self._extract_btn = QPushButton("Extract", self)
-        self._extract_btn.setStyleSheet("QPushButton { font-weight: bold; padding: 6px 14px; }")
-        self._extract_btn.clicked.connect(self.extract_clicked)
-        layout.addWidget(self._extract_btn)
-
-        self._begin_btn = QPushButton("Begin Entry", self)
-        self._begin_btn.setStyleSheet("QPushButton { font-weight: bold; padding: 6px 14px; }")
-        self._begin_btn.clicked.connect(self.begin_entry_clicked)
-        layout.addWidget(self._begin_btn)
-
         self._cancel_btn = QPushButton("Cancel", self)
+        self._cancel_btn.setObjectName("HeaderBtnSecondary")
         self._cancel_btn.clicked.connect(self.cancel_clicked)
         layout.addWidget(self._cancel_btn)
 
         self._resume_btn = QPushButton("Resume", self)
-        self._resume_btn.setStyleSheet("QPushButton { font-weight: bold; padding: 6px 14px; }")
+        self._resume_btn.setObjectName("HeaderBtnPrimary")
         self._resume_btn.clicked.connect(self.resume_clicked)
         layout.addWidget(self._resume_btn)
 
@@ -124,49 +116,9 @@ class RunControlsBar(QWidget):
     # -- Internal ----------------------------------------------------------
 
     def _refresh_button_states(self) -> None:
-        # Centralized button-state logic. Every state-change setter calls
-        # this so we never end up with, say, Begin Entry enabled while a
-        # run is already in flight.
         any_run_active = self._is_entering or self._is_extracting or self._is_paused
 
-        # Extract: needs at least one queued PDF and no in-flight run.
-        can_extract = (
-            self._pending_pdf_count > 0
-            and not any_run_active
-        )
-        self._extract_btn.setEnabled(can_extract)
-        if self._is_extracting:
-            self._extract_btn.setToolTip("Extraction in progress...")
-        elif self._pending_pdf_count == 0:
-            self._extract_btn.setToolTip(
-                "Drop PDFs onto the window or click 'Add PDFs...' to queue them, "
-                "then click Extract."
-            )
-        else:
-            self._extract_btn.setToolTip(
-                f"Run extraction on {self._pending_pdf_count} queued PDF(s)."
-            )
-
-        can_begin = (
-            not any_run_active
-            and self._approved_count > 0
-        )
-        self._begin_btn.setEnabled(can_begin)
-        if self._approved_count == 0:
-            self._begin_btn.setToolTip(
-                "Approve at least one field before starting an entry run."
-            )
-        else:
-            self._begin_btn.setToolTip(
-                f"Start entering {self._approved_count} approved fields into EPIC."
-            )
-
-        # Cancel only meaningful while a run is in flight.
         self._cancel_btn.setEnabled(any_run_active)
 
-        # Resume only visible while paused.
         self._resume_btn.setVisible(self._is_paused)
         self._resume_btn.setEnabled(self._is_paused)
-
-        # Force-Opus toggle is disabled mid-run (no effect on an in-flight call).
-        self._force_opus_check.setEnabled(not (self._is_entering or self._is_extracting))

@@ -39,6 +39,8 @@ __all__ = [
     "save_atomic",
     "lookup_by_domain_tag",
     "lookup_by_name",
+    "lookup_by_screen_display_name",
+    "tag_for_field",
     "fields_for_screen",
     "generate_domain_tag_enum",
     "update_field",
@@ -413,6 +415,66 @@ def lookup_by_name(
     Returns ``None`` if no such field exists.
     """
     return field_map._by_screen_name.get((screen_code, name))
+
+
+def lookup_by_screen_display_name(
+    field_map: FieldMap, screen_display_name: str, name: str
+) -> FieldEntry | None:
+    """Return the entry for ``(screen_display_name, name)``.
+
+    GUI-friendly counterpart of :func:`lookup_by_name`: callers specify the
+    screen by its human-readable key (e.g., ``"Commercial AP > Applicant"``)
+    rather than its terse ``screen_code``. Walks the screen's nested
+    ``tabs`` / ``sub_tabs`` to find a field with matching ``name``.
+
+    Returns ``None`` if the screen doesn't exist or no field with that
+    ``name`` is present anywhere within it. Status is not filtered — the
+    returned entry may be unmapped, proposed, or verified; callers
+    inspect ``entry.domain_tag`` and ``entry.raw.get("domain_tag_status")``
+    to decide what to do.
+    """
+    screen = field_map.raw.get(screen_display_name)
+    if not isinstance(screen, dict):
+        return None
+
+    def walk(node: dict) -> FieldEntry | None:
+        for f in node.get("fields") or []:
+            if isinstance(f, dict) and f.get("name") == name:
+                screen_code = f.get("screen_code") or screen.get("screen_code")
+                return FieldEntry(raw=f, screen_code=screen_code)
+        for tab in node.get("tabs") or []:
+            if isinstance(tab, dict):
+                hit = walk(tab)
+                if hit is not None:
+                    return hit
+        for st in node.get("sub_tabs") or []:
+            if isinstance(st, dict):
+                hit = walk(st)
+                if hit is not None:
+                    return hit
+        return None
+
+    return walk(screen)
+
+
+def tag_for_field(
+    field_map: FieldMap, screen_display_name: str, name: str
+) -> str | None:
+    """Return the verified ``domain_tag`` for the field at ``(screen, name)``.
+
+    Convenience wrapper over :func:`lookup_by_screen_display_name` that
+    returns the tag string only when the field exists AND is verified.
+    Used by the GUI section forms to bind columns to canonical tags.
+
+    Returns ``None`` if the field is missing, has no tag, or its status
+    is anything other than ``"verified"``.
+    """
+    entry = lookup_by_screen_display_name(field_map, screen_display_name, name)
+    if entry is None:
+        return None
+    if entry.raw.get("domain_tag_status") != "verified":
+        return None
+    return entry.domain_tag
 
 
 def fields_for_screen(

@@ -31,6 +31,10 @@ desktop.ini
 .vscode/
 .idea/
 
+# --- Claude Code / agent tooling state (per-project, not portable) ---
+.claude/
+.playwright-mcp/
+
 # --- Project runtime state (per PLAN-REVIEW.md, never committed) ---
 Working Library/
 
@@ -38,8 +42,10 @@ Working Library/
 # diagnostic_inputs/: PDFs are gitignored (real or synthetic, may contain PII);
 #   the README.md inside is tracked.
 # diagnostic_workspace/: runtime state from scripts/diagnose.py runs.
+# Example Clients/: real client folders with PDFs that may contain PII.
 Testing and Example Library/diagnostic_inputs/*.pdf
 Testing and Example Library/diagnostic_workspace/
+Testing and Example Library/Example Clients/
 
 # --- Backups, temp, debug ---
 *.bak

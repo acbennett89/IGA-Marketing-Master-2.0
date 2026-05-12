@@ -30,6 +30,7 @@ from PySide6.QtGui import QAction, QDesktopServices, QKeySequence
 from PySide6.QtWidgets import (
     QApplication,
     QFileDialog,
+    QFrame,
     QHBoxLayout,
     QLabel,
     QMainWindow,
@@ -37,9 +38,10 @@ from PySide6.QtWidgets import (
     QMenuBar,
     QMessageBox,
     QProgressBar,
+    QPushButton,
+    QScrollArea,
     QSplitter,
-    QTabWidget,
-    QToolBar,
+    QStackedWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -57,9 +59,10 @@ from .operator_modal import (
     RecoverInterruptedRunDialog,
     SelectorUnresolvedPauseDialog,
 )
-from .pdf_preview import PdfPreview
 from .pending_pdfs_pane import PendingPdfsPane
 from .repeatable_pane import RepeatablePane
+from .sidebar import SidebarNav
+from .upload_panel import UploadPanel
 from .run_controls import RunControlsBar
 from .section_table import (
     CONFIDENCE_HIGH_THRESHOLD,
@@ -107,6 +110,327 @@ _QS_VIEW_LOW_CONF_FILTER: str = "view/lowConfidenceFilter"
 
 _RECENT_CLIENTS_MAX: int = 5
 
+# ---------------------------------------------------------------------------
+# Application-level stylesheet
+# ---------------------------------------------------------------------------
+
+_APP_QSS = """
+/* ── Global reset — ensure light backgrounds everywhere ── */
+QMainWindow, QWidget {
+    background: white;
+    color: #1e293b;
+}
+
+/* ── Context menus ── */
+QMenu {
+    background: white;
+    border: 1px solid #e2e8f0;
+    border-radius: 6px;
+    padding: 4px;
+    font-size: 12px;
+    color: #1e293b;
+}
+QMenu::item {
+    padding: 6px 16px;
+    border-radius: 4px;
+}
+QMenu::item:selected {
+    background: #eff6ff;
+    color: #1d4ed8;
+}
+QMenu::separator {
+    height: 1px;
+    background: #e2e8f0;
+    margin: 4px 8px;
+}
+
+/* ── Tooltips ── */
+QToolTip {
+    background: #fffbeb;
+    color: #1e293b;
+    border: 1px solid #d1d5db;
+    border-radius: 4px;
+    padding: 6px 8px;
+    font-size: 12px;
+}
+QMainWindow {
+    background: #f1f5f9;
+}
+QWidget#MainContent {
+    background: #f1f5f9;
+}
+
+/* ── Page containers ── */
+QWidget#DataReviewPage,
+QWidget#ContentArea {
+    background: white;
+}
+
+/* ── Page header ── */
+QWidget#PageHeaderBar {
+    background: white;
+    border-bottom: 1px solid #e2e8f0;
+}
+QLabel#PageTitle {
+    font-size: 20px;
+    font-weight: bold;
+    color: #0f172a;
+}
+QLabel#PageSubtitle {
+    font-size: 12px;
+    color: #64748b;
+}
+
+/* ── Header action buttons ── */
+QPushButton#HeaderBtnPrimary {
+    background: #2563eb;
+    color: white;
+    border: none;
+    border-radius: 6px;
+    padding: 8px 18px;
+    font-size: 13px;
+    font-weight: bold;
+    min-width: 90px;
+}
+QPushButton#HeaderBtnPrimary:hover  { background: #1d4ed8; }
+QPushButton#HeaderBtnPrimary:disabled {
+    background: #93c5fd;
+    color: #dbeafe;
+}
+QPushButton#HeaderBtnSecondary {
+    background: white;
+    color: #374151;
+    border: 1px solid #d1d5db;
+    border-radius: 6px;
+    padding: 7px 18px;
+    font-size: 13px;
+    min-width: 80px;
+}
+QPushButton#HeaderBtnSecondary:hover {
+    background: #f9fafb;
+    border-color: #9ca3af;
+}
+QPushButton#HeaderBtnSecondary:disabled {
+    color: #d1d5db;
+    border-color: #e5e7eb;
+}
+
+/* ── Upload panel divider ── */
+QFrame#PanelDivider {
+    background: #e2e8f0;
+    min-width: 1px;
+    max-width: 1px;
+    border: none;
+}
+
+/* ── Splitters ── */
+QSplitter {
+    background: white;
+}
+QSplitter::handle {
+    background: #e2e8f0;
+}
+QSplitter::handle:horizontal {
+    width: 1px;
+}
+QSplitter::handle:vertical {
+    height: 1px;
+}
+
+/* ── Custom tab button bar ── */
+QScrollArea#TabBarScroll,
+QScrollArea#TabBarScroll > QWidget,
+QScrollArea#TabBarScroll > QWidget > QWidget,
+QWidget#TabBarInner {
+    background: white;
+}
+QScrollArea#TabBarScroll {
+    border: none;
+    border-bottom: 1px solid #e2e8f0;
+}
+QScrollArea#TabBarScroll QScrollBar:horizontal {
+    height: 8px;
+    background: #f1f5f9;
+    margin: 0;
+    border-radius: 4px;
+}
+QScrollArea#TabBarScroll QScrollBar::handle:horizontal {
+    background: #94a3b8;
+    border-radius: 4px;
+    min-width: 30px;
+}
+QScrollArea#TabBarScroll QScrollBar::handle:horizontal:hover {
+    background: #64748b;
+}
+QScrollArea#TabBarScroll QScrollBar::add-line:horizontal,
+QScrollArea#TabBarScroll QScrollBar::sub-line:horizontal {
+    width: 0px;
+}
+QPushButton#TabBtn {
+    background: transparent;
+    border: none;
+    border-bottom: 3px solid transparent;
+    border-radius: 0px;
+    padding: 9px 14px;
+    margin: 0 1px;
+    color: #64748b;
+    font-size: 12px;
+    min-height: 42px;
+    max-height: 42px;
+}
+QPushButton#TabBtn:hover {
+    color: #374151;
+    background: #f8fafc;
+}
+QPushButton#TabBtn[active="true"] {
+    color: #2563eb;
+    border-bottom: 3px solid #2563eb;
+    font-weight: bold;
+}
+QPushButton#TabBtn[dimmed="true"] {
+    color: #cbd5e1;
+}
+/* ── Tab content stack ── */
+QStackedWidget#TabStack {
+    background: white;
+}
+
+/* ── File queue list (PendingPdfsPane) ── */
+QListWidget {
+    background: white;
+    border: 1px solid #e2e8f0;
+    border-radius: 4px;
+    outline: none;
+}
+QListWidget::item {
+    padding: 5px 8px;
+    color: #374151;
+    border-radius: 3px;
+}
+QListWidget::item:hover {
+    background: #f1f5f9;
+}
+QListWidget::item:selected {
+    background: #eff6ff;
+    color: #1d4ed8;
+}
+QListWidget::item:alternate {
+    background: #f8fafc;
+}
+
+/* ── Audit log ── */
+QPlainTextEdit {
+    background: white;
+    border: none;
+    border-top: 1px solid #e2e8f0;
+    color: #374151;
+    font-size: 11px;
+}
+
+/* ── Run-controls bar ── */
+RunControlsBar {
+    background: white;
+    border-top: 1px solid #e2e8f0;
+}
+
+/* ── Section tables ── */
+QTableView {
+    background: white;
+    gridline-color: #f1f5f9;
+    border: none;
+    selection-background-color: #eff6ff;
+    selection-color: #1e293b;
+}
+QHeaderView::section {
+    background: #f8fafc;
+    border: none;
+    border-bottom: 1px solid #e2e8f0;
+    border-right: 1px solid #e2e8f0;
+    padding: 5px 8px;
+    color: #475569;
+    font-size: 11px;
+    font-weight: bold;
+}
+
+/* ── Placeholder pages ── */
+QWidget#HistoryPage,
+QWidget#SettingsPage,
+QWidget#HelpPage {
+    background: #f8fafc;
+}
+QLabel#PlaceholderTitle {
+    font-size: 18px;
+    font-weight: bold;
+    color: #374151;
+}
+QLabel#PlaceholderBody {
+    font-size: 13px;
+    color: #6b7280;
+}
+
+/* ── Status bar ── */
+QStatusBar {
+    background: #f8fafc;
+    border-top: 1px solid #e2e8f0;
+    color: #475569;
+    font-size: 11px;
+}
+"""
+
+# ---------------------------------------------------------------------------
+# Page header bar (title + subtitle + primary action buttons)
+# ---------------------------------------------------------------------------
+
+
+class _PageHeaderBar(QWidget):
+    """Sticky header strip at the top of the Data Review page.
+
+    Contains the page title, a subtitle, and the Extract / Begin Entry action
+    buttons so the operator can launch runs without scrolling to the bottom bar.
+    """
+
+    extract_clicked = Signal()
+    begin_entry_clicked = Signal()
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("PageHeaderBar")
+        self.setFixedHeight(68)
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(20, 0, 20, 0)
+        layout.setSpacing(12)
+
+        # Title + subtitle block
+        title_block = QWidget()
+        tb = QVBoxLayout(title_block)
+        tb.setContentsMargins(0, 0, 0, 0)
+        tb.setSpacing(2)
+
+        title = QLabel("Data Review")
+        title.setObjectName("PageTitle")
+        tb.addWidget(title)
+
+        sub = QLabel("Review and verify extracted insurance data from your PDFs.")
+        sub.setObjectName("PageSubtitle")
+        sub.setTextInteractionFlags(Qt.TextInteractionFlag.NoTextInteraction)
+        tb.addWidget(sub)
+
+        layout.addWidget(title_block, 1)
+
+        # Action buttons
+        self.extract_btn = QPushButton("Extract")
+        self.extract_btn.setObjectName("HeaderBtnSecondary")
+        self.extract_btn.setToolTip("Run extraction on queued PDFs (Ctrl+E).")
+        self.extract_btn.clicked.connect(self.extract_clicked)
+        layout.addWidget(self.extract_btn)
+
+        self.begin_btn = QPushButton("Begin Entry")
+        self.begin_btn.setObjectName("HeaderBtnPrimary")
+        self.begin_btn.setToolTip("Start entering approved fields into EPIC (Ctrl+Return).")
+        self.begin_btn.clicked.connect(self.begin_entry_clicked)
+        layout.addWidget(self.begin_btn)
+
 
 # ---------------------------------------------------------------------------
 # Tab-derivation vocabulary
@@ -114,25 +438,28 @@ _RECENT_CLIENTS_MAX: int = 5
 
 
 TAB_LABELS: dict[str, str] = {
-    "submission": "Submission",
-    "account": "Account",
-    "producer": "Producer",
+    # Default coverage sections (always shown)
+    "account": "Named Insureds",
+    "location": "Locations",
     "policy.gl": "General Liability",
-    "policy.auto": "Auto",
     "policy.property": "Property",
-    "policy.workers_comp": "Workers Comp",
-    "policy.umbrella": "Umbrella",
+    "policy.auto": "Business Auto",
+    "policy.inland_marine": "Inland Marine",
+    "policy.workers_comp": "Worker's Compensation",
+    "policy.umbrella": "Umbrella/Excess",
+    "forms": "Unclassified Forms",
+    "notes": "Notes",
+    # Extended sections (appear when data is present)
+    "submission": "Submission",
+    "producer": "Producer",
     "policy.crime": "Crime",
     "policy.cyber": "Cyber",
-    "policy.inland_marine": "Inland Marine",
     "policy.professional": "Professional",
     "policy.directors_officers": "D&O",
     "policy.employment_practices": "EPL",
     "policy.pollution": "Pollution",
     "vehicle": "Vehicles",
     "driver": "Drivers",
-    "location": "Locations",
-    "loss_payee": "Additional Interests",
     "additional_insured": "Additional Insureds",
     "prior_carrier": "Prior Carriers",
     "loss": "Loss History",
@@ -141,29 +468,55 @@ TAB_LABELS: dict[str, str] = {
 # Order in which tabs appear; namespaces not listed here append after, sorted.
 TAB_ORDER: tuple[str, ...] = tuple(TAB_LABELS.keys())
 
+# Tabs that are always visible regardless of whether client data exists.
+DEFAULT_TAB_KEYS: tuple[str, ...] = (
+    "account",
+    "location",
+    "policy.gl",
+    "policy.property",
+    "policy.auto",
+    "policy.inland_marine",
+    "policy.workers_comp",
+    "policy.umbrella",
+    "forms",
+    "notes",
+)
+
 # Repeatable namespaces use the RepeatablePane variant; everything else is a
 # plain SectionTableView over filtered state.fields.
 REPEATABLE_NAMESPACES: frozenset[str] = frozenset(
     {"vehicle", "driver", "location", "loss_payee", "additional_insured", "prior_carrier", "loss"}
 )
 
+# Namespaces that should never appear as tabs even if data is extracted into
+# them. The data is preserved in state.json (useful for diagnostics) but the
+# operator-facing GUI hides it. Keep entries here in sync with the upcoming
+# domain_tags registry.
+HIDDEN_NAMESPACES: frozenset[str] = frozenset({"submission", "producer"})
+
 
 def derive_tab_keys(state: dict | None) -> list[str]:
-    """Return the ordered list of tab keys present in ``state``.
+    """Return the ordered list of tab keys for ``state``.
 
-    Pure function — the main window calls it whenever state changes. The
-    tab key vocabulary is documented in DECISION-MAP-gui-agent.md §1.
+    Always includes DEFAULT_TAB_KEYS so the coverage sections are visible
+    even before any data is extracted. Additional keys (vehicles, etc.) are
+    appended when present in the state. Namespaces in HIDDEN_NAMESPACES are
+    suppressed unconditionally.
     """
-    keys: set[str] = set()
+    keys: set[str] = set(DEFAULT_TAB_KEYS)
     if state:
         fields_map = state.get("fields") or {}
         for tag in fields_map.keys():
             keys.add(_tab_key_for_tag(tag))
+        # Repeatable groups get collapsed to their parent tab namespace
+        # (e.g., 'policy.gl.hazard' rolls up to the 'policy.gl' tab where
+        # the hazards are rendered as an embedded table). Without this
+        # roll-up, every LOB-nested repeatable group would surface as its
+        # own top-level tab.
         for group in (state.get("repeatables") or {}).keys():
-            keys.add(group)
-    if not keys:
-        # Always-on anchor tab for an empty state.
-        keys.add("submission")
+            keys.add(_tab_key_for_tag(group))
+
+    keys -= HIDDEN_NAMESPACES
 
     ordered = [k for k in TAB_ORDER if k in keys]
     leftovers = sorted(keys - set(TAB_ORDER))
@@ -202,7 +555,9 @@ def count_tab_field_total(state: dict | None, tab_key: str) -> int:
     For repeatable namespaces (vehicle, location, ...) the count is
     ``len(state.repeatables[tab_key])``. For singleton tabs it's the
     number of ``state.fields`` keys whose ``_tab_key_for_tag`` resolves to
-    ``tab_key``.
+    ``tab_key`` plus the count of repeatable items in any group whose
+    name starts with ``tab_key`` (e.g., ``policy.gl.hazard`` rolls up
+    into the ``policy.gl`` tab badge).
     """
     if not state:
         return 0
@@ -210,7 +565,17 @@ def count_tab_field_total(state: dict | None, tab_key: str) -> int:
         items = (state.get("repeatables") or {}).get(tab_key, [])
         return len(items) if isinstance(items, list) else 0
     fields_map: dict = state.get("fields") or {}
-    return sum(1 for tag in fields_map.keys() if _tab_key_for_tag(tag) == tab_key)
+    singleton_count = sum(
+        1 for tag in fields_map.keys() if _tab_key_for_tag(tag) == tab_key
+    )
+    rep_map: dict = state.get("repeatables") or {}
+    rep_count = 0
+    prefix = tab_key + "."
+    for group, items in rep_map.items():
+        if group == tab_key or group.startswith(prefix):
+            if isinstance(items, list):
+                rep_count += len(items)
+    return singleton_count + rep_count
 
 
 def count_low_confidence_in_tab(state: dict | None, tab_key: str) -> int:
@@ -248,11 +613,23 @@ def count_low_confidence_in_tab(state: dict | None, tab_key: str) -> int:
         )
 
     fields_map: dict = state.get("fields") or {}
-    return sum(
+    singleton_low = sum(
         1
         for tag, record in fields_map.items()
         if _tab_key_for_tag(tag) == tab_key and _record_is_low(record)
     )
+    rep_map: dict = state.get("repeatables") or {}
+    rep_low = 0
+    prefix = tab_key + "."
+    for group, items in rep_map.items():
+        if (group == tab_key or group.startswith(prefix)) and isinstance(items, list):
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                rep_low += sum(
+                    1 for record in item.values() if _record_is_low(record)
+                )
+    return singleton_low + rep_low
 
 
 def build_tab_label(state: dict | None, tab_key: str) -> str:
@@ -673,17 +1050,31 @@ class MainWindow(QMainWindow):
         self._find_query: str = ""
         self._low_confidence_filter: bool = False
 
-        # Cache of QAction objects we need to enable/disable from
-        # _refresh_run_controls (so Ctrl+E etc. follow the button gating).
-        self._run_actions: dict[str, QAction] = {}
+        # Cache of QAction / QPushButton objects we need to enable/disable.
+        # Values may be QAction *or* QPushButton — both have setEnabled().
+        self._run_actions: dict = {}
         # Cache of recent-clients QActions so we can rebuild on aboutToShow.
         self._recent_menu: QMenu | None = None
         # The "Get started" empty-state widget; we reuse one instance.
         self._welcome_pane: WelcomePane | None = None
-        # Track widgets so toggles (View → Show PDF Preview, etc.) work.
-        self._center_split: QSplitter | None = None
+        # Track widgets so toggles (View → Show Audit Log, etc.) work.
         self._outer_split: QSplitter | None = None
         self._bottom_widget: QWidget | None = None
+        # Sidebar + page stack (set during _build_ui)
+        self._sidebar: SidebarNav | None = None
+        self._pages: QStackedWidget | None = None
+        self._page_index: dict[str, int] = {}
+        # Upload panel (wraps PendingPdfsPane with nicer UI)
+        self._upload_panel: UploadPanel | None = None
+        # Page header (Extract / Begin Entry buttons in header bar)
+        self._page_header: _PageHeaderBar | None = None
+        # Custom tab bar (replaces QTabWidget)
+        self._tab_bar_inner: QWidget | None = None
+        self._tab_bar_layout: QHBoxLayout | None = None
+        self._tab_stack: QStackedWidget | None = None
+        self._tab_pages: dict[str, QWidget] = {}
+        self._tab_buttons: dict[str, QPushButton] = {}
+        self._active_tab_key: str | None = None
 
         self.setWindowTitle("IGA Marketing Master 2.0")
         self.resize(1400, 900)
@@ -712,113 +1103,149 @@ class MainWindow(QMainWindow):
 
     # -- UI construction ---------------------------------------------------
 
-    def _build_ui(self) -> None:
-        # Top toolbar — client picker + file drop / browse.
-        self._toolbar = QToolBar("Workspace", self)
-        self._toolbar.setMovable(False)
-        self._toolbar.setObjectName("WorkspaceToolbar")
-        self.addToolBar(self._toolbar)
+    def _build_ui(self) -> None:  # noqa: C901
+        # -- Sidebar -------------------------------------------------------
+        self._sidebar = SidebarNav(self)
+        self._sidebar.page_changed.connect(self._on_sidebar_page_changed)
+        self._sidebar.launch_browser_clicked.connect(self._on_launch_browser_clicked)
 
-        pick_action = QAction("Pick client...", self)
-        pick_action.triggered.connect(self._on_pick_client)
-        self._toolbar.addAction(pick_action)
+        # -- Page stack ----------------------------------------------------
+        self._pages = QStackedWidget(self)
 
-        new_client_action = QAction("New client...", self)
-        new_client_action.triggered.connect(self._on_create_client)
-        self._toolbar.addAction(new_client_action)
+        # == Data Review page ==============================================
+        dr_widget = QWidget()
+        dr_widget.setObjectName("DataReviewPage")
+        dr_layout = QVBoxLayout(dr_widget)
+        dr_layout.setContentsMargins(0, 0, 0, 0)
+        dr_layout.setSpacing(0)
 
-        self._toolbar.addSeparator()
+        # Page header: title + action buttons
+        self._page_header = _PageHeaderBar(dr_widget)
+        self._page_header.extract_clicked.connect(self._on_extract_clicked)
+        self._page_header.begin_entry_clicked.connect(self._on_begin_entry)
+        self._run_actions["header_extract"] = self._page_header.extract_btn
+        self._run_actions["header_begin"] = self._page_header.begin_btn
+        dr_layout.addWidget(self._page_header)
 
-        add_pdfs_action = QAction("Add PDFs...", self)
-        add_pdfs_action.triggered.connect(self._on_add_pdfs)
-        self._toolbar.addAction(add_pdfs_action)
+        # Content row: upload panel | divider | review area
+        content = QWidget()
+        content.setObjectName("ContentArea")
+        content_layout = QHBoxLayout(content)
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        content_layout.setSpacing(0)
 
-        self._toolbar.addSeparator()
+        # Left: upload panel (drag-drop zone + file queue)
+        self._upload_panel = UploadPanel(content)
+        self._upload_panel.browse_clicked.connect(self._on_add_pdfs)
+        self._upload_panel.paths_changed.connect(self._refresh_pending_pdfs_state)
+        # Keep self._pending_pdfs_pane reference for all downstream handlers.
+        self._pending_pdfs_pane = self._upload_panel.pdfs_pane
+        content_layout.addWidget(self._upload_panel)
 
-        # UX-pass #10: Extract / Begin Entry on the toolbar mirror the
-        # bottom run-controls bar so the operator can find them wherever
-        # their eyes land.
-        toolbar_extract = QAction("Extract", self)
-        toolbar_extract.setToolTip("Run extraction on queued PDFs (Ctrl+E).")
-        toolbar_extract.triggered.connect(self._on_extract_clicked)
-        self._toolbar.addAction(toolbar_extract)
-        self._run_actions["toolbar_extract"] = toolbar_extract
+        # Thin vertical divider
+        panel_div = QFrame()
+        panel_div.setObjectName("PanelDivider")
+        panel_div.setFrameShape(QFrame.Shape.VLine)
+        content_layout.addWidget(panel_div)
 
-        toolbar_begin = QAction("Begin Entry", self)
-        toolbar_begin.setToolTip("Start entering approved fields into EPIC (Ctrl+Enter).")
-        toolbar_begin.triggered.connect(self._on_begin_entry)
-        self._toolbar.addAction(toolbar_begin)
-        self._run_actions["toolbar_begin"] = toolbar_begin
-
-        # Central widget: horizontal splitter — tabs on left, PDF preview on right.
-        self._tabs = QTabWidget(self)
-        self._tabs.setDocumentMode(True)
-        self._tabs.setTabsClosable(False)
-
-        # FindBar sits above the tabs. Hidden until Ctrl+F is pressed.
-        self._find_bar = FindBar(self)
+        # Right: custom tab bar + content stack + PDF preview (center splitter)
+        self._find_bar = FindBar()
         self._find_bar.query_changed.connect(self._on_find_query_changed)
         self._find_bar.closed.connect(self._on_find_bar_closed)
 
-        # Container that holds find_bar + tabs together so the splitter
-        # treats them as one unit.
-        tabs_container = QWidget(self)
-        tabs_container_layout = QVBoxLayout(tabs_container)
-        tabs_container_layout.setContentsMargins(0, 0, 0, 0)
-        tabs_container_layout.setSpacing(0)
-        tabs_container_layout.addWidget(self._find_bar)
-        tabs_container_layout.addWidget(self._tabs, 1)
+        # Tab button bar — horizontally scrollable row of QPushButtons
+        tab_bar_scroll = QScrollArea()
+        tab_bar_scroll.setObjectName("TabBarScroll")
+        tab_bar_scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded
+        )
+        tab_bar_scroll.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        tab_bar_scroll.setWidgetResizable(True)
+        tab_bar_scroll.setFixedHeight(54)
+        tab_bar_scroll.setFrameShape(QFrame.Shape.NoFrame)
 
-        self._pdf_preview = PdfPreview(self)
+        self._tab_bar_inner = QWidget()
+        self._tab_bar_inner.setObjectName("TabBarInner")
+        self._tab_bar_inner.setFixedHeight(46)  # 54px scroll area - 8px scrollbar track
+        self._tab_bar_layout = QHBoxLayout(self._tab_bar_inner)
+        self._tab_bar_layout.setContentsMargins(8, 0, 8, 0)
+        self._tab_bar_layout.setSpacing(2)
+        self._tab_bar_layout.addStretch(1)
+        tab_bar_scroll.setWidget(self._tab_bar_inner)
 
-        self._center_split = QSplitter(self)
-        self._center_split.setOrientation(Qt.Orientation.Horizontal)
-        self._center_split.setObjectName("CenterSplitter")
-        self._center_split.addWidget(tabs_container)
-        self._center_split.addWidget(self._pdf_preview)
-        self._center_split.setStretchFactor(0, 3)
-        self._center_split.setStretchFactor(1, 2)
+        # Tab content pages
+        self._tab_stack = QStackedWidget()
+        self._tab_stack.setObjectName("TabStack")
 
-        # Bottom: pending-PDFs queue + audit log + run controls.
-        self._pending_pdfs_pane = PendingPdfsPane(self)
-        self._pending_pdfs_pane.paths_changed.connect(self._refresh_pending_pdfs_state)
+        tabs_container = QWidget()
+        tc_layout = QVBoxLayout(tabs_container)
+        tc_layout.setContentsMargins(0, 0, 0, 0)
+        tc_layout.setSpacing(0)
+        tc_layout.addWidget(self._find_bar)
+        tc_layout.addWidget(tab_bar_scroll)
+        tc_layout.addWidget(self._tab_stack, 1)
 
-        pending_label = QLabel("Pending PDFs (drag here or use 'Add PDFs...')", self)
-        pending_label.setStyleSheet("QLabel { color: #555; padding: 2px 4px; }")
-
-        self._audit_log = AuditLogPane(self)
+        # Audit log + run controls beneath the tab area
+        self._audit_log = AuditLogPane()
         self._audit_log.attach_logger("iga", level=logging.INFO)
 
-        self._run_controls = RunControlsBar(self)
+        self._run_controls = RunControlsBar()
         self._run_controls.extract_clicked.connect(self._on_extract_clicked)
         self._run_controls.begin_entry_clicked.connect(self._on_begin_entry)
         self._run_controls.cancel_clicked.connect(self._on_cancel)
         self._run_controls.resume_clicked.connect(self._on_resume)
 
-        self._bottom_widget = QWidget(self)
-        bottom_layout = QVBoxLayout(self._bottom_widget)
-        bottom_layout.setContentsMargins(0, 0, 0, 0)
-        bottom_layout.setSpacing(2)
-        bottom_layout.addWidget(pending_label)
-        bottom_layout.addWidget(self._pending_pdfs_pane)
-        bottom_layout.addWidget(self._audit_log, 1)
-        bottom_layout.addWidget(self._run_controls)
-
-        # Outer vertical splitter.
-        self._outer_split = QSplitter(self)
+        # Outer vertical splitter (tabs area + audit)
+        self._outer_split = QSplitter()
         self._outer_split.setOrientation(Qt.Orientation.Vertical)
         self._outer_split.setObjectName("OuterSplitter")
-        self._outer_split.addWidget(self._center_split)
-        self._outer_split.addWidget(self._bottom_widget)
-        self._outer_split.setStretchFactor(0, 4)
+        self._outer_split.addWidget(tabs_container)
+        self._outer_split.addWidget(self._audit_log)
+        self._outer_split.setStretchFactor(0, 5)
         self._outer_split.setStretchFactor(1, 1)
 
-        self.setCentralWidget(self._outer_split)
+        # Keep _bottom_widget pointing to the audit pane for toggle compat.
+        self._bottom_widget = self._audit_log
 
-        # Status bar: text on the left, indeterminate-by-default progress
-        # bar on the right (hidden when idle). The progress strip is the
-        # operator's confirmation that an extraction or entry run is alive
-        # — see gui-fix-2 #2.
+        right_widget = QWidget()
+        right_layout = QVBoxLayout(right_widget)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        right_layout.setSpacing(0)
+        right_layout.addWidget(self._outer_split, 1)
+        right_layout.addWidget(self._run_controls)
+
+        content_layout.addWidget(right_widget, 1)
+        dr_layout.addWidget(content, 1)
+
+        idx = self._pages.addWidget(dr_widget)
+        self._page_index["data_review"] = idx
+
+        # == History page ==================================================
+        idx = self._pages.addWidget(self._build_history_page())
+        self._page_index["history"] = idx
+
+        # == Settings page =================================================
+        idx = self._pages.addWidget(self._build_settings_page())
+        self._page_index["settings"] = idx
+
+        # == Help page =====================================================
+        idx = self._pages.addWidget(self._build_help_page())
+        self._page_index["help"] = idx
+
+        # -- Outer container: sidebar | pages ------------------------------
+        main_content = QWidget()
+        main_content.setObjectName("MainContent")
+        mc_layout = QHBoxLayout(main_content)
+        mc_layout.setContentsMargins(0, 0, 0, 0)
+        mc_layout.setSpacing(0)
+        mc_layout.addWidget(self._sidebar)
+        mc_layout.addWidget(self._pages, 1)
+
+        self.setCentralWidget(main_content)
+
+        # Status bar
         self._progress_bar = QProgressBar(self)
         self._progress_bar.setMaximumWidth(220)
         self._progress_bar.setVisible(False)
@@ -826,6 +1253,130 @@ class MainWindow(QMainWindow):
         self._progress_bar.setTextVisible(False)
         self.statusBar().addPermanentWidget(self._progress_bar)
         self.statusBar().showMessage("Ready.")
+
+        # Apply app-level stylesheet
+        self.setStyleSheet(_APP_QSS)
+
+    # -- Sidebar-page helpers ----------------------------------------------
+
+    def _on_sidebar_page_changed(self, page_key: str) -> None:
+        idx = self._page_index.get(page_key, 0)
+        if self._pages is not None:
+            self._pages.setCurrentIndex(idx)
+
+    def _on_launch_browser_clicked(self) -> None:
+        """Spawn Chrome with remote-debugging enabled.
+
+        The EPIC entry script connects to this Chrome instance via Playwright
+        over CDP, so the operator's existing session (cookies, MFA state) is
+        reused. Port and user-data-dir defaults match v1 conventions.
+        """
+        import subprocess
+
+        port = "9222"
+        userdata = r"C:\Temp\chrome-debug"
+        chrome_candidates = [
+            r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+            r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+        ]
+        chrome_exe = next((p for p in chrome_candidates if Path(p).exists()), None)
+        if chrome_exe is None:
+            QMessageBox.critical(
+                self,
+                "Chrome Not Found",
+                "Could not locate chrome.exe. Install Chrome or update the "
+                "path in main_window._on_launch_browser_clicked.",
+            )
+            return
+
+        # Make sure the user-data-dir exists so Chrome doesn't fail silently
+        # on first launch.
+        try:
+            Path(userdata).mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            QMessageBox.warning(
+                self,
+                "User Data Dir",
+                f"Could not create {userdata}: {exc}",
+            )
+            return
+
+        cmd = [
+            chrome_exe,
+            f"--remote-debugging-port={port}",
+            f"--user-data-dir={userdata}",
+        ]
+        try:
+            subprocess.Popen(cmd)
+        except OSError as exc:
+            QMessageBox.critical(self, "Launch Failed", str(exc))
+            return
+
+        self._logger.info(
+            "browser.launched port=%s user_data_dir=%s exe=%s",
+            port, userdata, chrome_exe,
+        )
+        if self._sidebar is not None:
+            self._sidebar.set_engine_status(
+                False, f"Browser launched (port {port})"
+            )
+
+    @staticmethod
+    def _build_history_page() -> QWidget:
+        w = QWidget()
+        w.setObjectName("HistoryPage")
+        layout = QVBoxLayout(w)
+        layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        title = QLabel("History")
+        title.setObjectName("PlaceholderTitle")
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        body = QLabel(
+            "Audit log and run history are shown in the\n"
+            "Data Review page below the section tabs."
+        )
+        body.setObjectName("PlaceholderBody")
+        body.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(title)
+        layout.addWidget(body)
+        return w
+
+    @staticmethod
+    def _build_settings_page() -> QWidget:
+        w = QWidget()
+        w.setObjectName("SettingsPage")
+        layout = QVBoxLayout(w)
+        layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        title = QLabel("Settings")
+        title.setObjectName("PlaceholderTitle")
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        body = QLabel(
+            "Use File → Settings (coming soon) to configure\n"
+            "the Working Library path and API key."
+        )
+        body.setObjectName("PlaceholderBody")
+        body.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(title)
+        layout.addWidget(body)
+        return w
+
+    @staticmethod
+    def _build_help_page() -> QWidget:
+        w = QWidget()
+        w.setObjectName("HelpPage")
+        layout = QVBoxLayout(w)
+        layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        title = QLabel("Help")
+        title.setObjectName("PlaceholderTitle")
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        body = QLabel(
+            "Open TROUBLESHOOTING.md from the Help menu\n"
+            "or visit the project repository for documentation."
+        )
+        body.setObjectName("PlaceholderBody")
+        body.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(title)
+        layout.addWidget(body)
+        return w
 
     # -- Menu bar (UX-pass #1, #2) ------------------------------------------
 
@@ -914,15 +1465,9 @@ class MainWindow(QMainWindow):
 
         view_menu.addSeparator()
 
-        self._act_show_pdf = QAction("Show PDF Preview", self)
-        self._act_show_pdf.setCheckable(True)
-        self._act_show_pdf.setChecked(True)
-        self._act_show_pdf.toggled.connect(self._on_toggle_pdf_preview)
-        view_menu.addAction(self._act_show_pdf)
-
         self._act_show_audit = QAction("Show Audit Log", self)
         self._act_show_audit.setCheckable(True)
-        self._act_show_audit.setChecked(True)
+        self._act_show_audit.setChecked(False)
         self._act_show_audit.toggled.connect(self._on_toggle_audit_log)
         view_menu.addAction(self._act_show_audit)
 
@@ -1014,7 +1559,8 @@ class MainWindow(QMainWindow):
         # the filter; this is here to capture the close-without-edit path.
         self._find_query = ""
         self._reapply_filters_to_visible_tabs()
-        self._tabs.setFocus()
+        if self._tab_stack is not None:
+            self._tab_stack.setFocus()
 
     def _on_find_query_changed(self, text: str) -> None:
         self._find_query = text
@@ -1026,11 +1572,6 @@ class MainWindow(QMainWindow):
         self._reapply_filters_to_visible_tabs()
         self._update_status_bar_idle()
 
-    def _on_toggle_pdf_preview(self, checked: bool) -> None:
-        if self._pdf_preview is not None:
-            self._pdf_preview.setVisible(checked)
-        self._qsettings.setValue(_QS_VIEW_PDF_VISIBLE, bool(checked))
-
     def _on_toggle_audit_log(self, checked: bool) -> None:
         if self._audit_log is not None:
             self._audit_log.setVisible(checked)
@@ -1041,18 +1582,13 @@ class MainWindow(QMainWindow):
         for key in (
             _QS_GEOMETRY,
             _QS_WINDOW_STATE,
-            _QS_CENTER_SPLITTER,
             _QS_OUTER_SPLITTER,
         ):
             self._qsettings.remove(key)
         self.resize(1400, 900)
-        if self._center_split is not None:
-            self._center_split.setSizes([900, 500])
         if self._outer_split is not None:
-            self._outer_split.setSizes([700, 200])
-        # Re-show panes that may have been hidden via the View toggles.
-        self._act_show_pdf.setChecked(True)
-        self._act_show_audit.setChecked(True)
+            self._outer_split.setSizes([1000, 0])
+        self._act_show_audit.setChecked(False)
         self.statusBar().showMessage("Layout reset.", 3_000)
 
     def _on_open_troubleshooting(self) -> None:
@@ -1141,9 +1677,6 @@ class MainWindow(QMainWindow):
             window_state = self._qsettings.value(_QS_WINDOW_STATE)
             if window_state:
                 self.restoreState(window_state)
-            center = self._qsettings.value(_QS_CENTER_SPLITTER)
-            if center and self._center_split is not None:
-                self._center_split.restoreState(center)
             outer = self._qsettings.value(_QS_OUTER_SPLITTER)
             if outer and self._outer_split is not None:
                 self._outer_split.restoreState(outer)
@@ -1151,13 +1684,9 @@ class MainWindow(QMainWindow):
             _logger.warning("could not restore layout from QSettings: %s", exc)
 
         # View-menu checkable states (visibility + low-confidence filter).
-        pdf_visible = _to_bool(self._qsettings.value(_QS_VIEW_PDF_VISIBLE, True))
-        audit_visible = _to_bool(self._qsettings.value(_QS_VIEW_AUDIT_VISIBLE, True))
+        audit_visible = _to_bool(self._qsettings.value(_QS_VIEW_AUDIT_VISIBLE, False))
         low_conf = _to_bool(self._qsettings.value(_QS_VIEW_LOW_CONF_FILTER, False))
 
-        if hasattr(self, "_act_show_pdf"):
-            self._act_show_pdf.setChecked(pdf_visible)
-            self._pdf_preview.setVisible(pdf_visible)
         if hasattr(self, "_act_show_audit"):
             self._act_show_audit.setChecked(audit_visible)
             self._audit_log.setVisible(audit_visible)
@@ -1169,8 +1698,6 @@ class MainWindow(QMainWindow):
         try:
             self._qsettings.setValue(_QS_GEOMETRY, self.saveGeometry())
             self._qsettings.setValue(_QS_WINDOW_STATE, self.saveState())
-            if self._center_split is not None:
-                self._qsettings.setValue(_QS_CENTER_SPLITTER, self._center_split.saveState())
             if self._outer_split is not None:
                 self._qsettings.setValue(_QS_OUTER_SPLITTER, self._outer_split.saveState())
         except Exception as exc:  # noqa: BLE001
@@ -1236,13 +1763,54 @@ class MainWindow(QMainWindow):
     # -- Client management --------------------------------------------------
 
     def _maybe_seed_initial_client(self) -> None:
-        """Honor ``--client NAME`` if it was supplied on the CLI."""
+        """Honor ``--client NAME`` if it was supplied on the CLI.
+
+        Auto-creates the client folder when missing — important for the
+        ``--fresh --client _DIAGNOSTIC`` test-iteration flow, which wipes
+        the folder before the GUI starts, and for one-shot bootstrap of
+        a new client from the CLI.
+
+        Also honors ``--queue-pdfs PATH`` by populating the upload queue
+        with every PDF found under PATH.
+        """
         name = self._settings.cli_initial_client
+        _logger.info("seed_initial_client: cli_initial_client=%r", name)
         if not name:
             return
         candidate = self._settings.working_library / name
-        if candidate.exists():
-            self._load_client(candidate)
+        _logger.info("seed_initial_client: candidate=%s exists=%s",
+                     candidate, candidate.exists())
+        if not candidate.exists():
+            try:
+                candidate.mkdir(parents=True, exist_ok=True)
+                (candidate / "inputs").mkdir(exist_ok=True)
+                _logger.info("auto-created client folder via --client: %s", candidate)
+            except OSError as exc:
+                _logger.error(
+                    "could not auto-create client folder %s: %s", candidate, exc
+                )
+                return
+        _logger.info("seed_initial_client: calling _load_client(%s)", candidate)
+        self._load_client(candidate)
+        self._maybe_queue_initial_pdfs()
+
+    def _maybe_queue_initial_pdfs(self) -> None:
+        """Honor ``--queue-pdfs PATH`` by adding every PDF in PATH to the
+        upload queue. Called once after the initial client is loaded.
+        """
+        src = self._settings.cli_queue_pdfs
+        if src is None:
+            return
+        if not src.is_dir():
+            _logger.warning("--queue-pdfs path is not a directory: %s", src)
+            return
+        pdfs = sorted(p for p in src.iterdir() if p.is_file() and p.suffix.lower() == ".pdf")
+        if not pdfs:
+            _logger.info("--queue-pdfs: no PDFs found in %s", src)
+            return
+        if self._upload_panel is not None:
+            added = self._upload_panel.add_paths(pdfs)
+            _logger.info("--queue-pdfs: queued %d PDF(s) from %s", added, src)
 
     def _on_pick_client(self) -> None:
         choice = QFileDialog.getExistingDirectory(
@@ -1307,56 +1875,201 @@ class MainWindow(QMainWindow):
     # -- Tab derivation -----------------------------------------------------
 
     def _rebuild_tabs(self) -> None:
-        """Diff current tabs against target keys and apply the delta."""
-        if self._client is None:
-            # UX-pass #10: empty state. Show a welcome tab instead of nothing.
-            self._tabs.clear()
-            if self._welcome_pane is None:
-                self._welcome_pane = WelcomePane(self)
-            self._welcome_pane.setProperty("tab_key", "__welcome__")
-            self._tabs.addTab(self._welcome_pane, "Get started")
-            return
-        # Two paths: if the tab set hasn't changed, do an in-place refresh
-        # (preserves the operator's current tab + scroll position). If the
-        # tab set itself changed (new namespace appeared after extraction)
-        # we tear down and rebuild — there are at most ~22 tabs so the
-        # rebuild is cheap and avoids subtle state-mismatch bugs.
-        target_keys = derive_tab_keys(self._client.state)
-        current_keys = [self._tabs.widget(i).property("tab_key") for i in range(self._tabs.count())]
+        """Diff current tabs against target keys and apply the delta.
+
+        The coverage tabs (DEFAULT_TAB_KEYS) are always shown so the operator
+        can see the section structure even before a client is loaded. When no
+        client is loaded, each tab shows an empty-state hint instead of data.
+        """
+        target_keys = derive_tab_keys(self._client.state if self._client else None)
+        current_keys = list(self._tab_pages.keys())
+
         if current_keys == target_keys:
-            for i, key in enumerate(target_keys):
-                widget = self._tabs.widget(i)
+            # In-place refresh — preserves the operator's tab + scroll position.
+            state = self._client.state if self._client else None
+            for key in target_keys:
+                widget = self._tab_pages[key]
                 self._refresh_tab_widget(widget, key)
-                self._tabs.setTabText(i, build_tab_label(self._client.state, key))
+                btn = self._tab_buttons.get(key)
+                if btn is not None:
+                    btn.setText(build_tab_label(state, key))
             self._reapply_filters_to_visible_tabs()
             return
 
-        self._tabs.clear()
+        # Tab set changed — full rebuild.
+        # Remove old buttons from bar layout.
+        for btn in list(self._tab_buttons.values()):
+            self._tab_bar_layout.removeWidget(btn)
+            btn.setParent(None)
+            btn.deleteLater()
+        self._tab_buttons.clear()
+        # Remove old pages from stack.
+        while self._tab_stack.count():
+            w = self._tab_stack.widget(0)
+            self._tab_stack.removeWidget(w)
+            if w is not None:
+                w.setParent(None)
+                w.deleteLater()
+        self._tab_pages.clear()
+
+        state = self._client.state if self._client else None
         for key in target_keys:
             widget = self._build_tab_widget(key)
             widget.setProperty("tab_key", key)
-            self._tabs.addTab(widget, build_tab_label(self._client.state, key))
+            self._tab_stack.addWidget(widget)
+            self._tab_pages[key] = widget
+            label = build_tab_label(state, key)
+            btn = self._make_tab_button(key, label)
+            self._tab_buttons[key] = btn
+            # Insert before the trailing stretch (last item).
+            insert_pos = self._tab_bar_layout.count() - 1
+            self._tab_bar_layout.insertWidget(insert_pos, btn)
+
+        # Restore or default the active tab.
+        if target_keys:
+            key_to_select = (
+                self._active_tab_key
+                if self._active_tab_key in self._tab_pages
+                else target_keys[0]
+            )
+            self._select_tab(key_to_select)
+
         self._reapply_filters_to_visible_tabs()
 
+    def _make_tab_button(self, key: str, label: str) -> QPushButton:
+        btn = QPushButton(label)
+        btn.setObjectName("TabBtn")
+        btn.setProperty("active", False)
+        btn.setProperty("dimmed", False)
+        btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        btn.clicked.connect(lambda _=False, k=key: self._select_tab(k))
+        return btn
+
+    def _select_tab(self, key: str) -> None:
+        """Switch the active tab to ``key``, updating button styles + stack."""
+        # Deactivate old button.
+        if self._active_tab_key and self._active_tab_key in self._tab_buttons:
+            old_btn = self._tab_buttons[self._active_tab_key]
+            old_btn.setProperty("active", False)
+            old_btn.style().unpolish(old_btn)
+            old_btn.style().polish(old_btn)
+        self._active_tab_key = key
+        # Activate new button.
+        if key in self._tab_buttons:
+            new_btn = self._tab_buttons[key]
+            new_btn.setProperty("active", True)
+            new_btn.style().unpolish(new_btn)
+            new_btn.style().polish(new_btn)
+        # Switch stack page.
+        if key in self._tab_pages and self._tab_stack is not None:
+            self._tab_stack.setCurrentWidget(self._tab_pages[key])
+
     def _build_tab_widget(self, key: str) -> QWidget:
+        from .section_forms import SectionFormBase, make_section_form
+
+        state = self._client.state if self._client else None
+        form = make_section_form(key, state, self)
+        if form is not None:
+            form.field_changed.connect(self._on_section_form_field_changed)
+            return form
         if key in REPEATABLE_NAMESPACES:
             return self._build_repeatable_tab(key)
         return self._build_singleton_tab(key)
 
     def _refresh_tab_widget(self, widget: QWidget, key: str) -> None:
+        from .section_forms import SectionFormBase
+
+        form = widget if isinstance(widget, SectionFormBase) else None
+        if form is not None:
+            form.refresh(self._client.state if self._client else None)
+            return
         if key in REPEATABLE_NAMESPACES:
             pane = widget.findChild(RepeatablePane)
             if pane is not None and self._client is not None:
                 items = (self._client.state.get("repeatables") or {}).get(key, [])
                 pane.set_items(items)
             return
-        # Singleton tabs.
+        # Singleton tabs (extended sections without a dedicated form).
         view = widget.findChild(SectionTableView)
         if view is None:
             return
         model = view.model()
         if isinstance(model, SectionTableModel):
             model.set_rows(self._build_singleton_rows(key))
+
+    def _on_section_form_field_changed(self, domain_tag: str, value: object) -> None:
+        """Handle field edits from dedicated section forms."""
+        if domain_tag.startswith("__add:"):
+            group = domain_tag[len("__add:"):]
+            self._on_repeatable_add(group)
+            return
+        if domain_tag.startswith("__del:"):
+            payload = domain_tag[len("__del:"):]
+            colon = payload.rfind(":")
+            if colon == -1:
+                return
+            group = payload[:colon]
+            try:
+                idx = int(payload[colon + 1:])
+            except ValueError:
+                return
+            self._on_repeatable_delete(group, idx)
+            return
+        if domain_tag.startswith("__rep:"):
+            # Encoded as ``__rep:<group>:<index>:<tag>`` (the tag may
+            # contain '.', so split with maxsplit=3 from the left).
+            payload = domain_tag[len("__rep:"):]
+            parts = payload.split(":", 2)
+            if len(parts) != 3:
+                _logger.warning("malformed __rep: edit token: %r", domain_tag)
+                return
+            group, idx_str, tag = parts
+            try:
+                idx = int(idx_str)
+            except ValueError:
+                _logger.warning("__rep: edit has non-integer index: %r", domain_tag)
+                return
+            if self._client is None:
+                return
+            self._update_repeatable_field(group, idx, tag, value)
+            self._refresh_run_controls()
+            return
+        if self._client is None:
+            return
+        self._update_field(domain_tag, value)
+        self._refresh_run_controls()
+
+    def _update_repeatable_field(
+        self, group: str, index: int, tag: str, value: object
+    ) -> None:
+        """Update one field of one item in a repeatable group, persist state."""
+        if self._client is None:
+            return
+        state = self._client.state
+        reps = state.setdefault("repeatables", {})
+        items = reps.setdefault(group, [])
+        if not isinstance(items, list):
+            return
+        # Pad missing indices with empty dicts (defensive — shouldn't happen
+        # in normal flow since rows are populated before edits).
+        while len(items) <= index:
+            items.append({})
+        item = items[index]
+        if not isinstance(item, dict):
+            items[index] = {}
+            item = items[index]
+        # Edit the field record's value, preserving the rest of its metadata
+        # (confidence, source, etc.) so audit info isn't blown away.
+        rec = item.get(tag)
+        if isinstance(rec, dict):
+            rec["value"] = value
+            rec["status"] = "edited"
+            rec["conflicts"] = []
+        else:
+            item[tag] = {"value": value, "status": "edited", "conflicts": []}
+        # Persist via the same path singleton edits use.
+        self._persist_state()
 
     def _build_singleton_tab(self, key: str) -> QWidget:
         container = QWidget(self)
@@ -1385,12 +2098,14 @@ class MainWindow(QMainWindow):
 
         # Empty-state hint if the tab has no rows yet.
         if not rows:
-            hint = QLabel(
-                "No fields in this section yet.\nDrop PDFs onto the window or click 'Add PDFs...' to extract.",
-                container,
-            )
+            if self._client is None:
+                msg = "Pick a client (Ctrl+O) or drop PDFs onto the window to get started."
+            else:
+                msg = "No fields extracted for this section yet.\nAdd PDFs and click Extract to populate."
+            hint = QLabel(msg, container)
             hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            hint.setStyleSheet("QLabel { color: #777; padding: 24px; }")
+            hint.setStyleSheet("QLabel { color: #94a3b8; font-size: 13px; padding: 40px 24px; }")
+            hint.setWordWrap(True)
             layout.addWidget(hint)
 
         return container
@@ -1602,31 +2317,13 @@ class MainWindow(QMainWindow):
     # -- Source / conflict handlers ----------------------------------------
 
     def _on_source_clicked(self, doc_id: str, page: int) -> None:
-        if self._client is None:
-            return
-        self._pdf_preview.show_source(doc_id, page, client_inputs_dir=self._client.inputs_dir)
+        pass  # PDF preview removed
 
     def _on_field_focus_changed(self, domain_tag: str) -> None:
-        if self._client is None:
-            return
-        fields_map = self._client.state.get("fields") or {}
-        record = fields_map.get(domain_tag)
-        if isinstance(record, dict):
-            self._show_pdf_for_record(record)
+        pass  # PDF preview removed
 
     def _show_pdf_for_record(self, record: dict) -> None:
-        if self._client is None:
-            return
-        sources = record.get("source") or []
-        if not sources:
-            self._pdf_preview.show_source(None, None, client_inputs_dir=self._client.inputs_dir)
-            return
-        first = sources[0]
-        self._pdf_preview.show_source(
-            first.get("doc_id"),
-            int(first.get("page") or 1),
-            client_inputs_dir=self._client.inputs_dir,
-        )
+        pass  # PDF preview removed
 
     def _on_conflict_clicked(self, domain_tag: str) -> None:
         if self._client is None:
@@ -1806,21 +2503,26 @@ class MainWindow(QMainWindow):
 
         def task(worker: _CallableWorker) -> object:
             assert self._client is not None
-            worker.emit_progress(f"Extracting {pdf_count} PDF(s)...")
-            # extract.run_extraction signature: (client_name: str,
-            # pdf_paths, force_opus=False, *, settings=None, ...). It
-            # accepts no progress_callback — progress is logged via the
-            # `iga.extract` logger, which the AuditLogPane subscribes to.
+            worker.emit_progress_full(
+                f"Completed 0 of {pdf_count} — starting...", 0, pdf_count
+            )
+
+            def on_progress(message: str, current: int, total: int) -> None:
+                worker.emit_progress_full(message, current, total)
+
             return run_extraction(
                 self._client.name,
                 pdf_paths,
                 force_opus=force_opus,
                 settings=self._settings,
+                progress_callback=on_progress,
             )
 
         self._active_run_kind = "extract"
         self._run_controls.set_extracting(True)
-        self._show_progress_indeterminate(f"Extracting {pdf_count} PDF(s)...")
+        self._show_progress_determinate(
+            f"Completed 0 of {pdf_count} — starting...", 0, pdf_count
+        )
         self._spawn_worker(
             task,
             on_finished=self._on_extraction_finished,
@@ -1875,11 +2577,11 @@ class MainWindow(QMainWindow):
         can_begin = (approved > 0) and not any_run_active and self._client is not None
         can_cancel = any_run_active
 
-        for key in ("toolbar_extract", "menu_extract"):
+        for key in ("header_extract", "menu_extract"):
             act = self._run_actions.get(key)
             if act is not None:
                 act.setEnabled(can_extract)
-        for key in ("toolbar_begin", "menu_begin"):
+        for key in ("header_begin", "menu_begin"):
             act = self._run_actions.get(key)
             if act is not None:
                 act.setEnabled(can_begin)
@@ -2186,14 +2888,36 @@ class MainWindow(QMainWindow):
         worker = _CallableWorker(task)
         worker.moveToThread(thread)
 
+        # The user-supplied callbacks run on the main thread via QueuedConnection.
+        # Both signals carry data only (no Qt resources), so this is safe.
         worker.progress.connect(self._on_worker_progress)
-        worker.finished.connect(lambda result: (self._cleanup_worker(), on_finished(result)))
-        worker.failed.connect(lambda msg, tech: (self._cleanup_worker(), on_failed(msg, tech)))
+        worker.finished.connect(on_finished, Qt.ConnectionType.QueuedConnection)
+        worker.failed.connect(on_failed, Qt.ConnectionType.QueuedConnection)
+
+        # Canonical Qt thread-cleanup pattern: the thread terminates itself
+        # asynchronously via signals — no thread.wait() calls anywhere.
+        # Order of effects per Qt's deferred-deletion semantics:
+        #   1. worker emits finished/failed → user callback runs on main thread
+        #   2. thread.quit() posts a quit event into the worker's event loop
+        #   3. worker's event loop exits → thread emits finished
+        #   4. worker.deleteLater() and thread.deleteLater() are scheduled
+        #   5. self._on_worker_thread_finished() clears our references
+        worker.finished.connect(thread.quit)
+        worker.failed.connect(thread.quit)
+        thread.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(self._on_worker_thread_finished)
+
         thread.started.connect(worker.run)
 
         self._worker_thread = thread
         self._worker = worker
         thread.start()
+
+    def _on_worker_thread_finished(self) -> None:
+        """Clear worker references after the QThread has terminated cleanly."""
+        self._worker_thread = None
+        self._worker = None
 
     def _on_worker_progress(self, message: str, current: int, total: int) -> None:
         """Receive progress events from the active worker.
@@ -2215,6 +2939,8 @@ class MainWindow(QMainWindow):
         self._progress_bar.setRange(0, 0)
         self._progress_bar.setVisible(True)
         self.statusBar().showMessage(message)
+        if self._sidebar is not None:
+            self._sidebar.set_engine_status(True, message)
 
     def _show_progress_determinate(self, message: str, current: int, total: int) -> None:
         """Show the progress bar with a known total."""
@@ -2233,14 +2959,24 @@ class MainWindow(QMainWindow):
         # Show the brief completion message; it'll be replaced by the rich
         # idle status on the next timer tick or state-change event.
         self.statusBar().showMessage(idle_message)
+        if self._sidebar is not None:
+            self._sidebar.set_engine_status(False)
         self._update_status_bar_idle()
 
     def _cleanup_worker(self) -> None:
+        """Best-effort early termination (e.g., user clicked Cancel).
+
+        Normal completion is handled by `_on_worker_thread_finished` via the
+        thread.finished signal chain — this method is only used when we
+        want to ask the worker to stop immediately. We do NOT call
+        thread.wait() (which would raise "thread tried to wait on itself"
+        if the call somehow originated from the worker thread).
+        """
         if self._worker_thread is not None:
+            self._worker_thread.requestInterruption()
             self._worker_thread.quit()
-            self._worker_thread.wait(2000)
-            self._worker_thread = None
-        self._worker = None
+            # _on_worker_thread_finished will clear _worker_thread/_worker
+            # when the thread actually terminates.
 
     # -- Status bar (UX-pass #5) -------------------------------------------
 
@@ -2283,26 +3019,21 @@ class MainWindow(QMainWindow):
 
         Walks every tab's :class:`SectionTableView` (singleton tabs) and the
         nested view inside each :class:`RepeatablePane` (repeatable tabs),
-        hides non-matching rows, and greys out tab labels whose visible-row
-        count is zero.
+        hides non-matching rows, and dims tab buttons whose visible-row count
+        is zero when a find query is active.
         """
-        for i in range(self._tabs.count()):
-            widget = self._tabs.widget(i)
-            if widget is None:
-                continue
-            key = widget.property("tab_key")
+        for key, widget in self._tab_pages.items():
             if key in (None, "__welcome__"):
                 continue
             visible = self._apply_filter_to_widget(widget)
-            # Adjust tab text to reflect visibility — but only when the find
-            # query is active (otherwise the badges are the source of truth).
-            if self._find_query and visible == 0:
-                self._tabs.tabBar().setTabTextColor(i, Qt.GlobalColor.gray)
-            else:
-                # Default text color = black (or the OS default).
-                # Resetting to QColor() restores the default brush.
-                from PySide6.QtGui import QColor
-                self._tabs.tabBar().setTabTextColor(i, QColor())
+            btn = self._tab_buttons.get(key)
+            if btn is None:
+                continue
+            dimmed = bool(self._find_query and visible == 0)
+            if btn.property("dimmed") != dimmed:
+                btn.setProperty("dimmed", dimmed)
+                btn.style().unpolish(btn)
+                btn.style().polish(btn)
 
     def _apply_filter_to_widget(self, widget: QWidget) -> int:
         """Apply filters to all SectionTableView descendants; return total visible rows."""
@@ -2321,13 +3052,7 @@ class MainWindow(QMainWindow):
         """Edit-menu entry point: dispatch to the current tab's section."""
         if self._client is None:
             return
-        idx = self._tabs.currentIndex()
-        if idx < 0:
-            return
-        widget = self._tabs.widget(idx)
-        if widget is None:
-            return
-        key = widget.property("tab_key")
+        key = self._active_tab_key
         if not isinstance(key, str) or key == "__welcome__":
             return
         self._on_bulk_action(action, key)
@@ -2460,19 +3185,30 @@ class IgaApp:
     """Application entry point. See ARCHITECTURE.md §8.1."""
 
     @classmethod
-    def run(cls, *, debug: bool = False) -> int:
+    def run(
+        cls,
+        *,
+        debug: bool = False,
+        settings: "config_module.Settings | None" = None,
+    ) -> int:
         """Construct ``QApplication``, show the main window, run the loop.
 
         Returns the exit code from ``QApplication.exec()``. Called from
         ``cli.py``'s ``main()``.
+
+        :param debug: Whether to enable debug-mode behaviors.
+        :param settings: Pre-built ``Settings`` object from the CLI. Pass
+            this to preserve CLI overrides like ``--client`` and
+            ``--queue-pdfs``. If ``None``, settings are loaded from disk
+            with only ``debug`` as an override (legacy entry path).
         """
-        # Build settings + logging — safe to call repeatedly.
         from ..logger import configure_logging
 
-        settings = config_module.load_settings(
-            cli_overrides={"debug": debug} if debug else None,
-        )
-        configure_logging(settings)
+        if settings is None:
+            settings = config_module.load_settings(
+                cli_overrides={"debug": debug} if debug else None,
+            )
+            configure_logging(settings)
 
         app = QApplication.instance() or QApplication(sys.argv)
         app.setApplicationName(config_module.APP_NAME)

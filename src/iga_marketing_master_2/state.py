@@ -450,14 +450,177 @@ def _loss_key(item: RepeatableItem) -> str | None:
     return None
 
 
+def _policy_auto_vehicle_key(item: RepeatableItem) -> str | None:
+    vin = _norm_vin(_value_of(item, "policy.auto.vehicle.vin"))
+    if vin:
+        return vin
+    yr = _norm(_value_of(item, "policy.auto.vehicle.year"))
+    mk = _norm(_value_of(item, "policy.auto.vehicle.make"))
+    mo = _norm(_value_of(item, "policy.auto.vehicle.model"))
+    if yr and mk and mo:
+        return f"{yr}|{mk}|{mo}"
+    return None
+
+
+def _policy_auto_driver_key(item: RepeatableItem) -> str | None:
+    lic = _norm(_value_of(item, "policy.auto.driver.drivers_license_number"))
+    st = _norm(_value_of(item, "policy.auto.driver.state"))
+    if lic and st:
+        return f"lic:{lic}|{st}"
+    name = _norm(_value_of(item, "policy.auto.driver.name"))
+    dob = _norm(_value_of(item, "policy.auto.driver.birth"))
+    if name and dob:
+        return f"nm:{name}|{dob}"
+    if name:
+        return f"nm:{name}|"
+    return None
+
+
+def _location_key_actual(item: RepeatableItem) -> str | None:
+    # Try the canonical address tag, then fallbacks used in the section form.
+    addr = (
+        _norm(_value_of(item, "location.building_description"))
+        or _norm(_value_of(item, "location.address"))
+        or _norm(_value_of(item, "location.description"))
+    )
+    bldg = (
+        _norm(_value_of(item, "location.building_number"))
+        or _norm(_value_of(item, "location.bldg_number"))
+    )
+    return f"{addr}|{bldg}" if addr else None
+
+
+def _account_named_insured_key(item: RepeatableItem) -> str | None:
+    name = (
+        _norm(_value_of(item, "account.named_insured.name"))
+        or _norm(_value_of(item, "account.named_insured.fni_name"))
+    )
+    return f"{name}|" if name else None
+
+
+def _gl_hazard_key(item: RepeatableItem) -> str | None:
+    code = _norm(_value_of(item, "policy.gl.hazard.class_code"))
+    loc = _norm(_value_of(item, "policy.gl.hazard.location_number"))
+    bldg = _norm(_value_of(item, "policy.gl.hazard.building_number"))
+    if code and loc and bldg:
+        return f"{code}|{loc}|{bldg}"
+    if code and loc:
+        return f"{code}|{loc}|"
+    return None
+
+
+def _property_subject_key(item: RepeatableItem) -> str | None:
+    loc = _norm(_value_of(item, "policy.property.subject.location_number"))
+    bldg = _norm(_value_of(item, "policy.property.subject.building_number"))
+    subj = _norm(_value_of(item, "policy.property.subject.subject"))
+    if loc and bldg and subj:
+        return f"{loc}|{bldg}|{subj}"
+    return None
+
+
+def _wc_class_code_key(item: RepeatableItem) -> str | None:
+    code = _norm(_value_of(item, "policy.workers_comp.class_code.class_code"))
+    st = _norm(_value_of(item, "policy.workers_comp.class_code.state"))
+    if code and st:
+        return f"{code}|{st}"
+    if code:
+        return f"{code}|"
+    return None
+
+
+def _im_scheduled_item_key(item: RepeatableItem) -> str | None:
+    serial = _norm(_value_of(item, "policy.inland_marine.scheduled_item.serial_number"))
+    # Exclude placeholder serial numbers that carry no identifying information.
+    if serial and serial not in ("xxxx", "n/a", "none", "unknown"):
+        return f"sn:{serial}"
+    desc = _norm(_value_of(item, "policy.inland_marine.scheduled_item.description"))
+    amt = _norm_amount(_value_of(item, "policy.inland_marine.scheduled_item.amt_insurance"))
+    if desc and amt:
+        return f"desc+amt:{desc}|{amt}"
+    return f"desc:{desc}" if desc else None
+
+
+def _norm_amount(v: PrimitiveValue) -> str:
+    """Normalize a currency/numeric amount for comparison.
+
+    Strips leading ``$``, removes thousands commas, strips trailing ``.00``,
+    then applies standard _norm (casefold + whitespace collapse).  This lets
+    ``"$150,000"`` and ``"150000"`` compare equal across documents that format
+    amounts differently.
+    """
+    s = str(v).strip() if v is not None else ""
+    s = s.lstrip("$").replace(",", "")
+    if "." in s:
+        s = s.rstrip("0").rstrip(".")
+    return _norm(s)
+
+
+def _im_scheduled_item_extended_match(
+    candidate: RepeatableItem,
+    items: list[RepeatableItem],
+) -> int | None:
+    """Secondary match for IM scheduled items when the primary natural key
+    did not find a hit.
+
+    Rationale: dec pages and coverage summaries list the same equipment with
+    different serial-number availability.  A document that has the serial
+    number generates key ``sn:xxx``; a summary doc without the serial generates
+    ``desc+amt:…``.  These will never collide on string equality, so the same
+    item gets appended twice.  This function bridges that gap by looking for
+    an existing item whose (description, amount) pair matches the candidate
+    even if the key prefixes differ.
+
+    Amount comparison uses ``_norm_amount`` so that ``"$150,000"`` and
+    ``"150000"`` are treated as equal.
+    """
+    amt = _norm_amount(_value_of(candidate, "policy.inland_marine.scheduled_item.amt_insurance"))
+    desc = _norm(_value_of(candidate, "policy.inland_marine.scheduled_item.description"))
+    if not amt or not desc:
+        return None
+    for i, existing in enumerate(items):
+        ex_amt = _norm_amount(_value_of(existing, "policy.inland_marine.scheduled_item.amt_insurance"))
+        ex_desc = _norm(_value_of(existing, "policy.inland_marine.scheduled_item.description"))
+        if ex_amt != amt:
+            continue
+        # Accept if one description is a substring of the other (covers
+        # "Hydraulic Excavator" vs "2022 KOMATSU HYDRAULIC EXCAVATOR" style).
+        if ex_desc == desc or desc in ex_desc or ex_desc in desc:
+            return i
+    return None
+
+
+def _im_unscheduled_item_key(item: RepeatableItem) -> str | None:
+    desc = _norm(_value_of(item, "policy.inland_marine.unscheduled_item.description"))
+    return f"desc:{desc}" if desc else None
+
+
+def _umbrella_underlying_other_key(item: RepeatableItem) -> str | None:
+    carrier = _norm(_value_of(item, "policy.umbrella.underlying.other.carrier"))
+    pol = _norm(_value_of(item, "policy.umbrella.underlying.other.pol_num"))
+    if carrier and pol:
+        return f"{carrier}|{pol}"
+    if pol:
+        return f"|{pol}"
+    return None
+
+
 _NATURAL_KEY_FUNCS: dict[str, Any] = {
-    "vehicle": _vehicle_key,
-    "driver": _driver_key,
-    "location": _location_key,
+    # Short-name cross-LOB groups (legacy / may appear in older data)
     "loss_payee": _loss_payee_key,
     "additional_insured": _additional_insured_key,
     "prior_carrier": _prior_carrier_key,
     "loss": _loss_key,
+    # Actual group names used by the application
+    "location": _location_key_actual,
+    "account.named_insured": _account_named_insured_key,
+    "policy.auto.vehicle": _policy_auto_vehicle_key,
+    "policy.auto.driver": _policy_auto_driver_key,
+    "policy.gl.hazard": _gl_hazard_key,
+    "policy.property.subject": _property_subject_key,
+    "policy.workers_comp.class_code": _wc_class_code_key,
+    "policy.inland_marine.scheduled_item": _im_scheduled_item_key,
+    "policy.inland_marine.unscheduled_item": _im_unscheduled_item_key,
+    "policy.umbrella.underlying.other": _umbrella_underlying_other_key,
 }
 
 
@@ -1243,8 +1406,10 @@ def _merge_singleton(
 
     if detection == "lower_confidence_dropped":
         # New value loses on confidence, but it's still a real disagreement —
-        # capture as a conflict candidate for the GUI.
+        # capture as a conflict candidate and flag for review so the GUI
+        # highlights the cell regardless of which value "won" on confidence.
         rec.conflicts.append(_make_conflict_candidate(r))
+        rec.needs_review = True
         report.conflicts_added += 1
         return
 
@@ -1382,6 +1547,13 @@ def _merge_repeatable(
                 )
             target_index = matches[0]
 
+    # Extended match: when the primary key didn't resolve, try a
+    # content-based secondary match for groups that support it (currently
+    # only IM scheduled items, where serial-number availability varies across
+    # docs).
+    if target_index is None and group == "policy.inland_marine.scheduled_item":
+        target_index = _im_scheduled_item_extended_match(candidate_item, items)
+
     if target_index is None:
         # Append new item.
         items.append(candidate_item)
@@ -1403,16 +1575,26 @@ def _merge_repeatable(
 
 def _validate_repeatable_namespace(records: list[ExtractedField]) -> None:
     """Sanity check: a record marked repeatable_group=X must have a
-    domain_tag whose first dot-segment is X (per ARCHITECTURE.md §3 rule 5)."""
+    domain_tag whose namespace prefix matches X.
+
+    `repeatable_group` may be 1-3 segments per the locked registry:
+      - 1-segment cross-LOB groups: 'location', 'prior_carrier', 'loss'
+      - 2-segment account group:    'account.named_insured'
+      - 3-segment LOB-nested:       'policy.gl.hazard',
+                                    'policy.auto.vehicle',
+                                    'policy.<lob>.additional_interest', etc.
+
+    The domain_tag must start with `repeatable_group + "."` exactly.
+    """
     for r in records:
         if r.repeatable_group is None:
             continue
-        first_segment = r.domain_tag.split(".", 1)[0]
-        if first_segment != r.repeatable_group:
+        expected_prefix = r.repeatable_group + "."
+        if not r.domain_tag.startswith(expected_prefix):
             raise StateMergeError(
                 f"repeatable_group={r.repeatable_group!r} does not match "
                 f"namespace of domain_tag={r.domain_tag!r} "
-                f"(first segment {first_segment!r}). "
+                f"(expected the tag to start with {expected_prefix!r}). "
                 f"See ARCHITECTURE.md §3 rule 5."
             )
 

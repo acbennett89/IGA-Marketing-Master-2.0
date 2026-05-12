@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "iga-marketing-master-2"
 version = "0.1.0"
 description = "Single-user Windows desktop tool that extracts insurance data from PDFs via the Claude API and enters it into Applied EPIC via Playwright, with a stateful per-client review/edit GUI in between."
-requires-python = ">=3.13"
+requires-python = ">=3.12"
 readme = "README.md"
 license = { text = "Proprietary" }
 authors = [

@@ -46,6 +46,7 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 from . import claude_client, config, field_map, state
@@ -113,6 +114,130 @@ _DEFAULT_GLOSSARY: str = _load_prompt_asset(
         "conventions, common LOB shorthand, and EPIC's vocabulary."
     ),
 )
+_CANONICAL_TAGS_PLACEHOLDER = "{{CANONICAL_DOMAIN_TAGS}}"
+_EXTRACTION_NOTES_PLACEHOLDER = "{{EXTRACTION_NOTES}}"
+
+
+def _namespace_of(tag: str) -> str:
+    """Return the leading namespace of a tag for grouping in the prompt.
+
+    For LOB-nested namespaces (`policy.gl.hazard.class_code` or
+    `policy.auto.vehicle.year`), this returns the 2-segment LOB key
+    (`policy.gl`, `policy.auto`). For everything else it returns the
+    first segment.
+    """
+    parts = tag.split(".")
+    if not parts:
+        return tag
+    if parts[0] == "policy" and len(parts) >= 2:
+        return f"policy.{parts[1]}"
+    return parts[0]
+
+
+def _render_canonical_tags_block(fm: "field_map.FieldMap") -> str:
+    """Render the verified-tag list, grouped by namespace, for the prompt."""
+    # Pull every entry that has a verified domain_tag set; ignore aliases.
+    # Use the by_domain_tag index when available (real FieldMap), but
+    # tolerate test fakes that lack it.
+    entries: list[tuple[str, str]] = []  # (tag, label)
+    by_dt = getattr(fm, "_by_domain_tag", None)
+    if isinstance(by_dt, dict):
+        for tag, entry in by_dt.items():
+            raw = getattr(entry, "raw", {}) or {}
+            if raw.get("domain_tag_status") != "verified":
+                continue
+            label = getattr(entry, "label", None) or raw.get("label") or ""
+            entries.append((tag, label))
+
+    if not entries:
+        return "  (Field Map has no verified domain_tags yet.)"
+
+    # Group by namespace; sort within group.
+    from collections import defaultdict
+    by_ns: dict[str, list[tuple[str, str]]] = defaultdict(list)
+    for tag, label in entries:
+        by_ns[_namespace_of(tag)].append((tag, label))
+
+    # Build aligned blocks.
+    longest_tag = max(len(t) for t, _ in entries)
+    out_lines: list[str] = []
+    for ns in sorted(by_ns.keys()):
+        out_lines.append(f"{ns}:")
+        for tag, label in sorted(by_ns[ns]):
+            label_part = f"   — {label}" if label else ""
+            out_lines.append(f"  {tag.ljust(longest_tag)}{label_part}")
+        out_lines.append("")
+    # Synthetic tags get appended at the end, clearly labeled.
+    synth = _render_synthetic_tags_block()
+    if synth:
+        out_lines.append(synth)
+    return "\n".join(out_lines).rstrip()
+
+
+# Tags that don't correspond to a Field Map field but are part of our
+# canonical vocabulary. Claude can emit them as singletons in `fields`.
+# Each entry: (tag, description-for-prompt)
+_SYNTHETIC_TAGS: tuple[tuple[str, str], ...] = (
+    (
+        "policy.gl.ebl.aggregate_limit",
+        "Employee Benefits Liability (EBL) Aggregate Limit. EBL "
+        "endorsements typically list Each Claim and Total Aggregate "
+        "separately; emit the aggregate value here. Strip currency "
+        "symbols and commas. Pair with policy.gl.ebl.each_claim_limit.",
+    ),
+)
+
+
+def _render_synthetic_tags_block() -> str:
+    """Render synthetic tags that aren't backed by a Field Map field."""
+    if not _SYNTHETIC_TAGS:
+        return ""
+    lines = [
+        "synthetic singletons (no EPIC field — emit in `fields`):",
+    ]
+    longest = max(len(t) for t, _ in _SYNTHETIC_TAGS)
+    for tag, desc in _SYNTHETIC_TAGS:
+        lines.append(f"  {tag.ljust(longest)}   — {desc[:80]}")
+    return "\n".join(lines)
+
+
+def _render_extraction_notes_block(fm: "field_map.FieldMap") -> str:
+    """Render per-tag ``notes_for_claude`` guidance, grouped for readability.
+
+    Field Map fields with verified ``notes_for_claude`` text contribute one
+    block each. Notes accumulate over time as the team encounters tags that
+    Claude consistently mis-extracts and writes back guidance.
+    """
+    notes_iter = getattr(fm, "iter_notes_for_claude", None)
+    if not callable(notes_iter):
+        return "  (No extraction notes recorded yet.)"
+    pairs = notes_iter()
+    if not pairs:
+        return "  (No extraction notes recorded yet.)"
+    out_lines: list[str] = []
+    for tag, note in pairs:
+        out_lines.append(f"  {tag}:")
+        # Indent the note body by 6 spaces so it visually nests under the tag.
+        for line in note.splitlines() or [note]:
+            out_lines.append(f"      {line}")
+        out_lines.append("")
+    return "\n".join(out_lines).rstrip()
+
+
+def _render_system_prompt(template: str, fm: "field_map.FieldMap") -> str:
+    """Inject the live tag list and extraction-notes into the prompt."""
+    rendered = template
+    if _CANONICAL_TAGS_PLACEHOLDER in rendered:
+        rendered = rendered.replace(
+            _CANONICAL_TAGS_PLACEHOLDER, _render_canonical_tags_block(fm)
+        )
+    if _EXTRACTION_NOTES_PLACEHOLDER in rendered:
+        rendered = rendered.replace(
+            _EXTRACTION_NOTES_PLACEHOLDER, _render_extraction_notes_block(fm)
+        )
+    return rendered
+
+
 _DEFAULT_SYSTEM_PROMPT: str = _load_prompt_asset(
     "system_prompt.txt",
     fallback=(
@@ -664,6 +789,7 @@ def run_extraction(
     resume_run_id: str | None = None,
     glossary: str | None = None,
     system_prompt: str | None = None,
+    progress_callback: Callable[[str, int, int], None] | None = None,
 ) -> ExtractionResult:
     """Orchestrate extraction across `pdf_paths` for `client_name`.
 
@@ -712,6 +838,10 @@ def run_extraction(
 
     fm = field_map.load()
     enum_tags = set(field_map.generate_domain_tag_enum(fm))
+    # Synthetic tags are canonical vocabulary but have no Field Map entry;
+    # include them so Claude's output flows directly into state rather than
+    # getting routed to the JIT proposal queue.
+    enum_tags.update(tag for tag, _ in _SYNTHETIC_TAGS)
 
     state_obj = state.load(client_path)
 
@@ -778,8 +908,16 @@ def run_extraction(
     debug_root = client_path / "debug" / "claude" / run_id
 
     glossary_text = glossary if glossary is not None else _DEFAULT_GLOSSARY
-    system_prompt_text = (
+    system_prompt_template = (
         system_prompt if system_prompt is not None else _DEFAULT_SYSTEM_PROMPT
+    )
+    # Inject the live verified-tag list. Done per-run so a freshly-edited
+    # Field Map is reflected without restarting the process.
+    system_prompt_text = _render_system_prompt(system_prompt_template, fm)
+    _logger.info(
+        "extract.prompt_rendered tags=%d size_chars=%d",
+        len(enum_tags),
+        len(system_prompt_text),
     )
 
     for pdf_path in pdf_list:
@@ -789,6 +927,19 @@ def run_extraction(
                 "extract.skip_already_done run_id=%s doc=%s", run_id, doc_id
             )
             continue
+        if progress_callback is not None:
+            # `completed_set` accumulates as the loop progresses (line ~970);
+            # `completed` is the initial-state snapshot and never changes,
+            # so reading from completed_set gives the live "X done so far"
+            # count rather than always reporting 0.
+            n_done = len(completed_set)
+            total = len(pdf_list)
+            doc_label = pdf_path.stem
+            progress_callback(
+                f"Completed {n_done} of {total} — Reading {doc_label}",
+                n_done,
+                total,
+            )
         summary = DocSummary(doc_id=doc_id, pdf_path=str(pdf_path))
         _logger.info(
             "extract.doc_start run_id=%s doc=%s", run_id, doc_id
@@ -894,6 +1045,18 @@ def run_extraction(
         state.set_pending_extraction(state_obj, pending)
         state.save_atomic(state_obj, client_path)
         per_doc.append(summary)
+
+        # Tick the progress bar to "X of N done" so the operator sees the
+        # bar advance after each successful doc, rather than only seeing
+        # the "starting doc N+1" message.
+        if progress_callback is not None:
+            n_done = len(completed_set)
+            total = len(pdf_list)
+            progress_callback(
+                f"Completed {n_done} of {total}",
+                n_done,
+                total,
+            )
 
     # Finalize ----------------------------------------------------------
     finished_at = _now_iso()

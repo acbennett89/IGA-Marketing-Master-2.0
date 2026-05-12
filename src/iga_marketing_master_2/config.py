@@ -113,6 +113,7 @@ class Settings:
     field_map_path: Path = field(default_factory=default_field_map_path)
     log_dir: Path = field(default_factory=default_log_dir)
     cli_initial_client: str | None = None  # from --client; advisory for the GUI
+    cli_queue_pdfs: Path | None = None     # from --queue-pdfs; advisory for the GUI
 
 
 # Helpers -------------------------------------------------------------------
@@ -166,6 +167,7 @@ def _apply_overrides(
             "playwright_profile",
             "field_map_path",
             "log_dir",
+            "cli_queue_pdfs",
         }
         if key in path_keys:
             patched[key] = _coerce_path(value)

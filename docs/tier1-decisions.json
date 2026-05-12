@@ -1,0 +1,30 @@
+{
+  "named_insureds_shape": {
+    "option": "path_b",
+    "notes": "Single account.named_insured.* repeatable group. Primary is the row with type=primary."
+  },
+  "vehicle_rescrape": {
+    "option": "resolved_no_action",
+    "notes": "Original analysis was naive — only counted top-level fields[]. Field Map's nested tabs structure has 73 vehicle fields across Vehicle/Rating/Coverages tabs. Scraper was fine."
+  },
+  "gl_additional_interest": {
+    "option": "fixed_in_place",
+    "notes": "21 correct AI fields moved from misnamed General Liability > GeneralInfo201404 into General Liability > AdditionalInterest. Misnamed entry deleted. The 27 wrong fields (Products schedule duplicates) confirmed as exact duplicates of General Liability > Products and discarded. Backup at Library/Epic Field Map.json.bak."
+  },
+  "address_subfields": {
+    "option": "always_seven_subtags",
+    "notes": "Every address gets line_1, line_2, line_3, city, state, zip, country (default US). Decoupled from EPIC UI shape. Missing Field Map entries handled at data-entry time via JIT enrichment."
+  },
+  "property_building_bpp": {
+    "option": "one_row_per_amount",
+    "notes": "Single policy.property.subject.* schema with coverage_type discriminator (Building | BPP | BI | Extra Expense). Matches EPIC storage. PropertyForm GUI table needs reshape post-Tier-1."
+  },
+  "umbrella_underlying": {
+    "option": "tier1_fixed_blocks",
+    "notes": "Three singleton sub-blocks (auto/gl/el) + one repeatable (other, EPIC cap 2). 35 tags total. cboGLDedType is the GL coverage type (occurrence/claims-made) field despite misleading internal name. policy_lookup excluded entirely (EPIC search widget, not data). All premiums excluded."
+  },
+  "global_premiums": {
+    "option": "out_of_scope",
+    "notes": "Premium fields excluded everywhere — per-limit AND aggregate. Affects Business Auto > CoverageTN (~30 fields), Worker's Comp, Inland Marine, GL coverages, Commercial AP > Status. If a single 'total policy premium' tag per LOB is wanted later, easy to add."
+  }
+}
