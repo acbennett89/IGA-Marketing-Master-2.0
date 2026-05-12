@@ -2692,10 +2692,15 @@ class MainWindow(QMainWindow):
         self._run_controls.set_extracting(False)
         self._active_run_kind = None
         self._close_busy_dialog()
+        # Reload state BEFORE the status-bar refresh fires, otherwise the
+        # "last run $X.XXXX · total $Y.YYYY" debug segment reads stale
+        # in-memory state (no cost_usd yet) and the operator doesn't see
+        # the cost until the next 30s idle-tick.
+        if self._client is not None:
+            self._client.state = _safe_state_load(self._client.path)
         self._hide_progress("Extraction complete.")
         if self._client is None:
             return
-        self._client.state = _safe_state_load(self._client.path)
         self._audit_log.append_event("Extraction complete.")
         self._rebuild_tabs()
         self._refresh_run_controls()
@@ -2704,6 +2709,11 @@ class MainWindow(QMainWindow):
         self._run_controls.set_extracting(False)
         self._active_run_kind = None
         self._close_busy_dialog()
+        # Partial-run failures still write a RunHistoryEntry with cost_usd
+        # for whatever docs completed. Reload so the debug cost segment
+        # reflects the partial spend.
+        if self._client is not None:
+            self._client.state = _safe_state_load(self._client.path)
         self._hide_progress("Extraction didn't finish.")
         QMessageBox.warning(
             self,
