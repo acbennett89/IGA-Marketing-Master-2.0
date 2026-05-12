@@ -1512,15 +1512,12 @@ class PropertyForm(SectionFormBase):
 
     def _build_form(self) -> None:
         self._root.addWidget(self._hdr("Property"))
-        g = self._grid(2)
-        # Policy-level singletons. Coinsurance is verified;
-        # `policy.property.valuation` is the policy-default valuation method.
-        self._add_text(g, 0, 0, "Coinsurance", "policy.property.coinsurance", "%")
-        self._add_text(g, 0, 1, "Default Valuation",
-                       "policy.property.valuation", "ACV / RC / Other")
-        self._root.addLayout(g)
+        # Policy-level Coinsurance and Default Valuation singletons removed —
+        # both are now captured per coverage subject below (one document can
+        # specify different coinsurance percentages or valuation methods per
+        # building, and rolling them up to a single policy-level value loses
+        # information).
 
-        self._root.addWidget(_hr())
         self._root.addLayout(
             self._section_row("Coverage Subjects",
                               "+ Add Subject", self.REPEATABLE_GROUP)
@@ -1531,12 +1528,12 @@ class PropertyForm(SectionFormBase):
             f"{self.REPEATABLE_GROUP}.subject",
             f"{self.REPEATABLE_GROUP}.amount",
             f"{self.REPEATABLE_GROUP}.valuation1",
-            f"{self.REPEATABLE_GROUP}.form_number",
-            f"{self.REPEATABLE_GROUP}.description",
+            f"{self.REPEATABLE_GROUP}.coinsurance",
+            f"{self.REPEATABLE_GROUP}.deductible",
         ]
         self._prop_tbl = self._table(
             7, ["Loc #", "Bldg #", "Coverage", "Limit",
-                "Valuation", "Form #", "Description"],
+                "Valuation", "Coinsurance", "Deductible"],
             editable=True,
         )
         header = self._prop_tbl.horizontalHeader()
@@ -1544,10 +1541,10 @@ class PropertyForm(SectionFormBase):
             header.setSectionResizeMode(c, QHeaderView.ResizeMode.Interactive)
         self._prop_tbl.setColumnWidth(0, 50)
         self._prop_tbl.setColumnWidth(1, 55)
-        self._prop_tbl.setColumnWidth(2, 130)
+        self._prop_tbl.setColumnWidth(2, 160)
         self._prop_tbl.setColumnWidth(3, 110)
-        self._prop_tbl.setColumnWidth(4, 90)
-        self._prop_tbl.setColumnWidth(5, 110)
+        self._prop_tbl.setColumnWidth(4, 110)
+        self._prop_tbl.setColumnWidth(5, 100)
         header.setSectionResizeMode(6, QHeaderView.ResizeMode.Stretch)
         self._prop_tbl.setMinimumHeight(_TBL_HEIGHT_6_ROWS)
         self._wire_table_edits(self._prop_tbl, self.REPEATABLE_GROUP, self._prop_tags)

@@ -6891,7 +6891,7 @@
         "disabled": true,
         "domain_tag": "policy.property.subject.subject",
         "aliases": [],
-        "notes_for_claude": null,
+        "notes_for_claude": "What the row insures. Two flavors are valid: (1) Standard subjects — 'Building', 'Personal Property of Insured' (or 'Business Personal Property' / 'Contents' / 'Stock'), 'Personal Property of Others', 'Business Income', 'Extra Expense', 'EDP' / 'Electronic Data Processing', 'Tenant Improvements'. (2) Peril-specific coverages that appear on the dec page with their own (Loc, Bldg, Limit, Valuation, Coinsurance, Deductible) row — 'Earthquake', 'Earthquake & Volcanic Eruption', 'Wind/Hail', 'Flood', 'Sinkhole', 'Mine Subsidence', 'Named Storm'. Emit the Coverage value verbatim as shown on the dec page (preserve capitalization / wording). Each (Loc, Bldg, subject) combination gets its own row, including separate rows for the same building when the document shows the same building under multiple subjects (e.g. Building + Personal Property + Earthquake = 3 rows).",
         "domain_tag_status": "verified"
       },
       {
@@ -6903,7 +6903,33 @@
         "disabled": true,
         "domain_tag": "policy.property.subject.valuation1",
         "aliases": [],
-        "notes_for_claude": null,
+        "notes_for_claude": "Per-subject valuation method. Emit exactly one of: 'Replacement Cost', 'Actual Cash Value' (or 'ACV'), 'Functional Replacement Cost', 'Agreed Value', 'Stated Amount', or 'Other'. Found on the property dec page typically labeled 'Valuation' or 'Val' next to each coverage row. If multiple rows on the same building have different valuations, emit them on their own subject rows — do NOT collapse to one.",
+        "domain_tag_status": "verified"
+      },
+      {
+        "type": "text",
+        "label": "Coinsurance",
+        "name": "synthetic_Subject_Coinsurance",
+        "required": false,
+        "format": "synthetic",
+        "is_repeatable": true,
+        "repeatable_group": "policy.property.subject",
+        "domain_tag": "policy.property.subject.coinsurance",
+        "aliases": [],
+        "notes_for_claude": "Per-subject coinsurance percentage. Emit as a percentage as printed (e.g. '80%', '90%', '100%'). Found on the property dec page in a Coinsurance column or row-level note. If multiple subjects on the same building have different coinsurance percentages, emit them on their own subject rows.",
+        "domain_tag_status": "verified"
+      },
+      {
+        "type": "text",
+        "label": "Deductible",
+        "name": "synthetic_Subject_Deductible",
+        "required": false,
+        "format": "synthetic",
+        "is_repeatable": true,
+        "repeatable_group": "policy.property.subject",
+        "domain_tag": "policy.property.subject.deductible",
+        "aliases": [],
+        "notes_for_claude": "Per-subject deductible. Emit as printed: a dollar amount ('$1,000', '5000') OR a percentage with sign ('10%', '5%'). Found on the property dec page in a Deductible column next to each coverage row, or in a per-peril deductible schedule (e.g. earthquake at 10%, wind/hail at $5,000). Use the per-subject deductible value, NOT the policy-wide deductible if one exists separately.",
         "domain_tag_status": "verified"
       },
       {
@@ -7874,7 +7900,7 @@
         "domain_tag": "policy.property.additional_coverage.name",
         "domain_tag_status": "verified",
         "aliases": [],
-        "notes_for_claude": "The plain-English coverage name. Examples: 'Equipment Breakdown', 'Ordinance or Law', 'Spoilage', 'Earthquake', 'Flood'."
+        "notes_for_claude": "The plain-English coverage name for an endorsement-style additional coverage: 'Equipment Breakdown', 'Ordinance or Law', 'Spoilage', 'Sign', 'Money & Securities', 'Accounts Receivable', 'Valuable Papers', 'Computer Equipment'. IMPORTANT: Peril-specific coverages that have their own (Loc, Bldg, Limit, Valuation, Coinsurance, Deductible) row on the property dec page — EARTHQUAKE, WIND/HAIL, FLOOD, SINKHOLE, MINE SUBSIDENCE, VOLCANIC ERUPTION, NAMED STORM — belong in policy.property.subject (as separate subject rows on the affected building), NOT here. Only use this group for endorsements that genuinely add a new coverage to the policy, not for per-peril coverage subjects."
       },
       {
         "type": "text",
@@ -8347,7 +8373,7 @@
         "hint": "combo",
         "domain_tag": "policy.property.coinsurance",
         "aliases": [],
-        "notes_for_claude": null,
+        "notes_for_claude": "DO NOT emit this tag. Per-subject coinsurance is captured on each coverage subject row via policy.property.subject.coinsurance. The policy-level coinsurance field is unused in this build because dec pages frequently show different coinsurance values per building / per coverage; collapsing to one policy-wide value loses data.",
         "domain_tag_status": "verified"
       },
       {
@@ -8561,7 +8587,7 @@
             "hint": "combo",
             "domain_tag": "policy.property.valuation",
             "aliases": [],
-            "notes_for_claude": null,
+            "notes_for_claude": "DO NOT emit this tag. Per-subject valuation is captured on each coverage subject row via policy.property.subject.valuation1. The policy-default valuation field is unused in this build — dec pages routinely show different valuation methods per building (Building = RC, Personal Property = ACV), so a single policy-level value loses data.",
             "domain_tag_status": "verified"
           }
         ],
