@@ -565,6 +565,14 @@ class SectionFormBase(QScrollArea):
         )
         t.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         t.setSortingEnabled(True)
+        # Qt's setSortingEnabled(True) defaults the sort indicator to
+        # column 0 DESCENDING, which makes row-numbered tables (Vehicles,
+        # Drivers, Class Codes, Scheduled Items) display in reverse order
+        # — the operator opens the Vehicle Schedule and sees "37, 36, 36,
+        # 35, ..." instead of "1, 2, 3, ...". Force the indicator to
+        # column 0 ASCENDING so the initial view is the natural order.
+        # The operator can still click any header to re-sort.
+        t.horizontalHeader().setSortIndicator(0, Qt.SortOrder.AscendingOrder)
         t.horizontalHeader().setSortIndicatorShown(True)
         t.horizontalHeader().setSectionsClickable(True)
         return t
@@ -681,11 +689,37 @@ class SectionFormBase(QScrollArea):
     def _section_row(self, title: str, add_label: str = "",
                      group: str = "") -> QHBoxLayout:
         row = QHBoxLayout()
-        row.addWidget(self._hdr(title))
+        label = self._hdr(title)
+        row.addWidget(label)
         row.addStretch(1)
         if add_label and group:
             row.addWidget(self._add_row_btn(add_label, group))
+        # Register the title label so the count can be appended in parens
+        # on every refresh: "Scheduled Items (50)", "Vehicles Schedule (37)",
+        # etc. Auto-refreshes whenever the form's refresh() runs (which
+        # happens after every add / delete / state-change).
+        if group:
+            if not hasattr(self, "_section_title_labels"):
+                self._section_title_labels: dict[str, tuple[QLabel, str]] = {}
+            self._section_title_labels[group] = (label, title)
+            self._update_section_count(group)
         return row
+
+    def _update_section_count(self, group: str) -> None:
+        """Refresh one section title to show the current item count.
+
+        Reads ``len(state.repeatables[group])`` and appends "(N)" to the
+        title. Pure-display update — does not mutate state.
+        """
+        registry = getattr(self, "_section_title_labels", None)
+        if not registry:
+            return
+        pair = registry.get(group)
+        if pair is None:
+            return
+        label, base = pair
+        items = _rep(self._state, group) if self._state else []
+        label.setText(f"{base} ({len(items)})")
 
     def _autofit_columns(self, table: QTableWidget) -> None:
         """Resize all columns to fit content, then switch to Interactive so
@@ -979,6 +1013,12 @@ class SectionFormBase(QScrollArea):
                 widget.setText(v)
             widget.blockSignals(False)
         self._refresh_tables(state)
+        self._refresh_all_section_counts()
+
+    def _refresh_all_section_counts(self) -> None:
+        """Update every registered section title with its current count."""
+        for group in getattr(self, "_section_title_labels", {}):
+            self._update_section_count(group)
 
 
 # ---------------------------------------------------------------------------

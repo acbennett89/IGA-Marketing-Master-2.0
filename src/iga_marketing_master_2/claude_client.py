@@ -207,6 +207,51 @@ class _RecordsList(list):  # noqa: SLOT000 - list subclass needs __dict__ for ca
     cache_usage: _CallUsage | None = None
 
 
+# ---------------------------------------------------------------------------
+# Cost calculation
+# ---------------------------------------------------------------------------
+# Anthropic API pricing per 1M tokens, USD. Documented rates as of 2026-05.
+# Cache-write is 1.25× input; cache-read is 0.10× input.
+_PRICING_PER_M: dict[str, dict[str, float]] = {
+    "sonnet": {
+        "input":       3.00,
+        "cache_write": 3.75,
+        "cache_read":  0.30,
+        "output":     15.00,
+    },
+    "opus": {
+        "input":      15.00,
+        "cache_write": 18.75,
+        "cache_read":  1.50,
+        "output":     75.00,
+    },
+}
+
+
+def compute_cost_usd(
+    *,
+    input_tokens: int,
+    cache_creation_input_tokens: int,
+    cache_read_input_tokens: int,
+    output_tokens: int,
+    model: str | None,
+) -> float:
+    """Return the USD cost of an Anthropic API call.
+
+    Selects Sonnet or Opus rates based on the model string ('opus' substring
+    match → Opus rates; everything else, including None and 'mixed', falls
+    back to Sonnet rates so we under-estimate rather than over-bill).
+    """
+    m = (model or "").lower()
+    rates = _PRICING_PER_M["opus"] if "opus" in m else _PRICING_PER_M["sonnet"]
+    return (
+        int(input_tokens or 0)                  / 1_000_000 * rates["input"]
+        + int(cache_creation_input_tokens or 0) / 1_000_000 * rates["cache_write"]
+        + int(cache_read_input_tokens or 0)     / 1_000_000 * rates["cache_read"]
+        + int(output_tokens or 0)               / 1_000_000 * rates["output"]
+    )
+
+
 def _usage_from_response(response: Any) -> _CallUsage:
     """Build a :class:`_CallUsage` from an Anthropic ``Message.usage`` block.
 

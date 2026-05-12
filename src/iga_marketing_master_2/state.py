@@ -268,6 +268,11 @@ class RunHistoryEntry:
     model_used: str | None = None
     forced_opus: bool | None = None
     notes: str | None = None
+    # Anthropic API USD cost for this specific run, derived from token usage
+    # × current Sonnet / Opus rates. None for runs that predate cost tracking
+    # or for entry-kind runs (no API calls). The cumulative across all runs
+    # lives at the top level on ``State.total_cost_usd``.
+    cost_usd: float | None = None
 
 
 @dataclass(slots=True, kw_only=True)
@@ -284,6 +289,10 @@ class State:
     pending_pause: PendingPause | None = None
     pending_extraction: PendingExtraction | None = None
     pending_domain_tag_proposals: list[dict[str, Any]] = field(default_factory=list)
+    # Cumulative Anthropic API spend across every extraction run on this
+    # client, in USD. Additive: each completed run adds its own cost (also
+    # stored on the RunHistoryEntry). Never decreases — re-runs append.
+    total_cost_usd: float = 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -748,6 +757,7 @@ def _state_to_dict(state: State) -> dict[str, Any]:
         "client": state.client,
         "created_at": state.created_at,
         "updated_at": state.updated_at,
+        "total_cost_usd": float(state.total_cost_usd),
         "run_history": [_dc_to_dict(r) for r in state.run_history],
         "fields": fields_dict,
         "repeatables": repeatables_dict,
@@ -843,6 +853,13 @@ def _pending_extraction_from_dict(
 
 
 def _run_history_from_dict(d: dict[str, Any]) -> RunHistoryEntry:
+    raw_cost = d.get("cost_usd")
+    cost_usd: float | None = None
+    if raw_cost is not None:
+        try:
+            cost_usd = float(raw_cost)
+        except (TypeError, ValueError):
+            cost_usd = None
     return RunHistoryEntry(
         run_id=d["run_id"],
         ts=d["ts"],
@@ -853,6 +870,7 @@ def _run_history_from_dict(d: dict[str, Any]) -> RunHistoryEntry:
         model_used=d.get("model_used"),
         forced_opus=d.get("forced_opus"),
         notes=d.get("notes"),
+        cost_usd=cost_usd,
     )
 
 
@@ -878,11 +896,17 @@ def _state_from_dict(raw: dict[str, Any], *, client_fallback: str) -> State:
     if raw_version < STATE_SCHEMA_VERSION:
         raw = _migrate_state(raw, from_version=raw_version)
 
+    raw_total = raw.get("total_cost_usd", 0.0)
+    try:
+        total_cost_usd = float(raw_total or 0.0)
+    except (TypeError, ValueError):
+        total_cost_usd = 0.0
     return State(
         schema_version=STATE_SCHEMA_VERSION,
         client=raw.get("client", client_fallback),
         created_at=raw.get("created_at", _now_iso()),
         updated_at=raw.get("updated_at", _now_iso()),
+        total_cost_usd=total_cost_usd,
         run_history=[
             _run_history_from_dict(r) for r in raw.get("run_history", [])
         ],

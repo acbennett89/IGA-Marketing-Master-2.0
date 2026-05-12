@@ -666,6 +666,7 @@ def _build_run_history_entry(
     model_used: str | None,
     forced_opus: bool,
     notes: str | None,
+    cost_usd: float | None = None,
 ) -> Any:
     return state.RunHistoryEntry(
         run_id=run_id,
@@ -677,6 +678,7 @@ def _build_run_history_entry(
         forced_opus=forced_opus,
         outcome=outcome,
         notes=notes,
+        cost_usd=cost_usd,
     )
 
 
@@ -895,6 +897,11 @@ def run_extraction(
     state.save_atomic(state_obj, client_path)
 
     aggregate_cache = CacheStats()
+    # Running total of this run's API cost in USD. Per-doc, we compute
+    # `compute_cost_usd(per_doc_usage, per_doc_model)` and add it here. At
+    # run end, we stamp the value onto the RunHistoryEntry and *add* it to
+    # `state_obj.total_cost_usd` (cumulative across all runs for the client).
+    run_cost_usd: float = 0.0
     per_doc: list[DocSummary] = []
     all_proposals: list[DomainTagProposal] = []
     total_records = 0
@@ -977,6 +984,24 @@ def run_extraction(
             usage = getattr(records[0], "_call_usage", None)
         _accumulate_cache_stats(aggregate_cache, usage)
         summary.records_returned = len(records)
+
+        # Compute this doc's USD cost using the per-doc model (Sonnet vs.
+        # Opus rates) and accumulate. Done before the records list is
+        # narrowed to known tags below, so unknown-proposal calls are
+        # counted too — they still cost real tokens.
+        if usage is not None:
+            per_doc_model = _aggregate_model_used(records) or "sonnet-4-6"
+            run_cost_usd += claude_client.compute_cost_usd(
+                input_tokens=getattr(usage, "input_tokens", 0) or 0,
+                cache_creation_input_tokens=getattr(
+                    usage, "cache_creation_input_tokens", 0
+                ) or 0,
+                cache_read_input_tokens=getattr(
+                    usage, "cache_read_input_tokens", 0
+                ) or 0,
+                output_tokens=getattr(usage, "output_tokens", 0) or 0,
+                model=per_doc_model,
+            )
 
         # Partition tags.
         known, proposals = _split_records_by_known_tag(
@@ -1075,8 +1100,17 @@ def run_extraction(
         model_used=last_completed_model,
         forced_opus=force_opus,
         notes=error_message,
+        cost_usd=round(run_cost_usd, 6) if run_cost_usd > 0 else None,
     )
     state.append_run_history(state_obj, history_entry)
+    # Additive: each run's cost is added to the cumulative client total
+    # rather than replacing it. A partial-then-completed run pair therefore
+    # double-counts the docs that succeeded in both runs — that matches
+    # actual API billing, which charged us for each call regardless of
+    # whether the run completed.
+    state_obj.total_cost_usd = float(
+        state_obj.total_cost_usd or 0.0
+    ) + float(run_cost_usd or 0.0)
     state.set_pending_extraction(state_obj, None)
     state.save_atomic(state_obj, client_path)
 

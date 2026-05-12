@@ -3079,12 +3079,45 @@ class MainWindow(QMainWindow):
         filter_tag = (
             " · [Low-confidence filter ON]" if self._low_confidence_filter else ""
         )
+        # Debug-mode cost segment. Shows the most recent extraction-run cost
+        # plus the cumulative client total. Hidden in production to keep the
+        # status line tidy for operators who don't need to think about cost.
+        cost_tag = ""
+        if self._debug:
+            last_run_cost = self._latest_extraction_cost_usd()
+            total_cost = float(self._client.state.get("total_cost_usd") or 0.0)
+            if last_run_cost is not None or total_cost > 0:
+                parts: list[str] = []
+                if last_run_cost is not None:
+                    parts.append(f"last run ${last_run_cost:.4f}")
+                if total_cost > 0:
+                    parts.append(f"total ${total_cost:.4f}")
+                cost_tag = " · " + " · ".join(parts)
         msg = (
             f"Client: {self._client.name} · "
             f"{total_fields} fields · {total_items} items · {saved_str}"
-            f"{filter_tag}"
+            f"{filter_tag}{cost_tag}"
         )
         self.statusBar().showMessage(msg)
+
+    def _latest_extraction_cost_usd(self) -> float | None:
+        """Return the cost_usd of the most recent extraction run, or None."""
+        if self._client is None:
+            return None
+        history = self._client.state.get("run_history") or []
+        for entry in reversed(history):
+            if not isinstance(entry, dict):
+                continue
+            if entry.get("kind") != "extraction":
+                continue
+            cost = entry.get("cost_usd")
+            if cost is None:
+                continue
+            try:
+                return float(cost)
+            except (TypeError, ValueError):
+                return None
+        return None
 
     # -- Filter reapply (UX-pass #8, #9) -----------------------------------
 
