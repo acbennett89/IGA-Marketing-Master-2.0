@@ -1429,7 +1429,11 @@ class NamedInsuredsForm(SectionFormBase):
         # Cache resolved tags so refresh doesn't re-query the Field Map per row.
         self._ni_tags = _resolve_column_tags(cols)
         self._wire_table_edits(self._ni_tbl, self.REPEATABLE_GROUP, self._ni_tags)
-        self._refresh_tables(self._state)
+        # NOTE: SectionFormBase.__init__ calls _refresh_tables(state) right
+        # after _build_form() returns. Don't call it here too — a double
+        # call combined with sorting-enabled tables causes phantom duplicate
+        # rows (Qt re-sorts between the two passes and the second pass
+        # writes to physical rows that the first pass had reshuffled).
 
     def _refresh_tables(self, state: dict | None) -> None:
         if not hasattr(self, "_ni_tbl"):
@@ -1462,7 +1466,7 @@ class LocationsForm(SectionFormBase):
         self._root.addWidget(self._loc_tbl, 1)
         self._loc_tags = _resolve_column_tags(cols)
         self._wire_table_edits(self._loc_tbl, self.REPEATABLE_GROUP, self._loc_tags)
-        self._refresh_tables(self._state)
+        # Base __init__ runs _refresh_tables right after this — don't double-call.
 
     def _refresh_tables(self, state: dict | None) -> None:
         if not hasattr(self, "_loc_tbl"):
@@ -1962,7 +1966,7 @@ class BusinessAutoForm(SectionFormBase):
             subject_ref_leaf="vehicle_number",
         )
         self._root.addWidget(self._ai_tbl)
-        self._refresh_tables(self._state)
+        # Base __init__ runs _refresh_tables right after this — don't double-call.
 
     def _refresh_tables(self, state: dict | None) -> None:
         if not hasattr(self, "_veh_tbl"):
@@ -2068,7 +2072,7 @@ class InlandMarineForm(SectionFormBase):
             subject_ref_leaf="item_number",
         )
         self._root.addWidget(self._ai_tbl)
-        self._refresh_tables(self._state)
+        # Base __init__ runs _refresh_tables right after this — don't double-call.
 
     @staticmethod
     def _strip_ymm(desc: str, year: str, make: str, model: str) -> str:
@@ -2290,7 +2294,7 @@ class WorkersCompForm(SectionFormBase):
         self._root.addWidget(self._forms_tbl)
         self._add_cov_tbl = self._add_cov_table("policy.workers_comp")
         self._root.addWidget(self._add_cov_tbl)
-        self._refresh_tables(self._state)
+        # Base __init__ runs _refresh_tables right after this — don't double-call.
 
     def _sub_hdr(self, text: str) -> QLabel:
         """Sub-header label (smaller than ``_hdr``, used inside a coverage
@@ -2514,7 +2518,7 @@ class UmbrellaExcessForm(SectionFormBase):
         self._root.addWidget(self._add_cov_tbl)
         self._ai_tbl = self._add_ai_section("policy.umbrella")
         self._root.addWidget(self._ai_tbl)
-        self._refresh_tables(self._state)
+        # Base __init__ runs _refresh_tables right after this — don't double-call.
 
     def _refresh_tables(self, state: dict | None) -> None:
         if not hasattr(self, "_other_tbl"):
@@ -2545,7 +2549,7 @@ class UnclassifiedFormsForm(SectionFormBase):
         self._forms_tbl.setColumnWidth(2, 110)
         self._forms_tbl.setMinimumHeight(_TBL_HEIGHT_6_ROWS)
         self._root.addWidget(self._forms_tbl, 1)
-        self._refresh_tables(self._state)
+        # Base __init__ runs _refresh_tables right after this — don't double-call.
 
     def _refresh_tables(self, state: dict | None) -> None:
         if not hasattr(self, "_forms_tbl"):
