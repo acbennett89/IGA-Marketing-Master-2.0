@@ -687,18 +687,17 @@ class SectionFormBase(QScrollArea):
         return btn
 
     def _section_row(self, title: str, add_label: str = "",
-                     group: str = "") -> QHBoxLayout:
+                     group: str = "", *, show_count: bool = False) -> QHBoxLayout:
         row = QHBoxLayout()
         label = self._hdr(title)
         row.addWidget(label)
         row.addStretch(1)
         if add_label and group:
             row.addWidget(self._add_row_btn(add_label, group))
-        # Register the title label so the count can be appended in parens
-        # on every refresh: "Scheduled Items (50)", "Vehicles Schedule (37)",
-        # etc. Auto-refreshes whenever the form's refresh() runs (which
-        # happens after every add / delete / state-change).
-        if group:
+        # Item count in parens — opt-in, only the three tables the operator
+        # asked for show it (Vehicles Schedule, Driver Schedule, Scheduled
+        # Items). For every other section the title stays clean.
+        if group and show_count:
             if not hasattr(self, "_section_title_labels"):
                 self._section_title_labels: dict[str, tuple[QLabel, str]] = {}
             self._section_title_labels[group] = (label, title)
@@ -1911,7 +1910,8 @@ class BusinessAutoForm(SectionFormBase):
         ]
         self._root.addWidget(_hr())
         self._root.addLayout(
-            self._section_row("Vehicles Schedule", "+ Add Vehicle", self._veh_group)
+            self._section_row("Vehicles Schedule", "+ Add Vehicle", self._veh_group,
+                              show_count=True)
         )
         self._veh_tbl = self._table(
             9, ["#", "Year", "Make", "Model", "VIN", "Type",
@@ -1940,7 +1940,8 @@ class BusinessAutoForm(SectionFormBase):
         ]
         self._root.addWidget(_hr())
         self._root.addLayout(
-            self._section_row("Driver Schedule", "+ Add Driver", self._drv_group)
+            self._section_row("Driver Schedule", "+ Add Driver", self._drv_group,
+                              show_count=True)
         )
         self._drv_tbl = self._table(
             6, ["#", "Driver Name", "License #", "State", "Date of Birth", "Type"]
@@ -2010,7 +2011,8 @@ class InlandMarineForm(SectionFormBase):
 
         self._root.addWidget(_hr())
         self._root.addLayout(
-            self._section_row("Scheduled Items", "+ Add Item", self.SCHED_GROUP)
+            self._section_row("Scheduled Items", "+ Add Item", self.SCHED_GROUP,
+                              show_count=True)
         )
         self._sched_tags: list[str | None] = [
             f"{self.SCHED_GROUP}.item_number",
