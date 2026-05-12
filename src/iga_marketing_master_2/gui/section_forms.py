@@ -12,6 +12,8 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QLabel,
     QLineEdit,
+    QListWidget,
+    QListWidgetItem,
     QMenu,
     QPlainTextEdit,
     QPushButton,
@@ -905,6 +907,207 @@ _CB_STYLE = (
 )
 
 
+# 50 US states + DC, 2-letter USPS code and full name. The Workers Comp
+# Active/Other state pickers and the Rating Information table both use this
+# list. Sorted alphabetically by code so the popup renders predictably.
+_US_STATES: tuple[tuple[str, str], ...] = (
+    ("AL", "Alabama"), ("AK", "Alaska"), ("AZ", "Arizona"), ("AR", "Arkansas"),
+    ("CA", "California"), ("CO", "Colorado"), ("CT", "Connecticut"),
+    ("DC", "District of Columbia"), ("DE", "Delaware"), ("FL", "Florida"),
+    ("GA", "Georgia"), ("HI", "Hawaii"), ("ID", "Idaho"), ("IL", "Illinois"),
+    ("IN", "Indiana"), ("IA", "Iowa"), ("KS", "Kansas"), ("KY", "Kentucky"),
+    ("LA", "Louisiana"), ("ME", "Maine"), ("MD", "Maryland"),
+    ("MA", "Massachusetts"), ("MI", "Michigan"), ("MN", "Minnesota"),
+    ("MS", "Mississippi"), ("MO", "Missouri"), ("MT", "Montana"),
+    ("NE", "Nebraska"), ("NV", "Nevada"), ("NH", "New Hampshire"),
+    ("NJ", "New Jersey"), ("NM", "New Mexico"), ("NY", "New York"),
+    ("NC", "North Carolina"), ("ND", "North Dakota"), ("OH", "Ohio"),
+    ("OK", "Oklahoma"), ("OR", "Oregon"), ("PA", "Pennsylvania"),
+    ("RI", "Rhode Island"), ("SC", "South Carolina"), ("SD", "South Dakota"),
+    ("TN", "Tennessee"), ("TX", "Texas"), ("UT", "Utah"), ("VT", "Vermont"),
+    ("VA", "Virginia"), ("WA", "Washington"), ("WV", "West Virginia"),
+    ("WI", "Wisconsin"), ("WY", "Wyoming"),
+)
+_US_STATE_CODES: frozenset[str] = frozenset(c for c, _ in _US_STATES)
+_US_STATE_NAME_BY_CODE: dict[str, str] = dict(_US_STATES)
+
+# Sentinel value for the "All Other" pseudo-option on the Other States picker.
+# Stored alongside real state codes in the comma-separated singleton value.
+ALL_OTHER_STATES_TOKEN: str = "ALL OTHER"
+
+
+class _StatesMultiSelectWidget(QWidget):
+    """Multi-select state picker.
+
+    Button shows selected codes (or a count when many are selected); clicking
+    opens a popup with one checkbox per US state. Selected items render at
+    the top of the popup. An optional special "All Other" pseudo-option is
+    supported for the Other States picker.
+
+    Mimics the QLineEdit interface (``setText`` / ``text``) so the base-class
+    ``refresh()`` can update it like any other input widget — value is the
+    comma-separated list of selected codes (e.g. ``"TN,KY,NC"``).
+
+    A sibling widget can call ``set_excluded(codes)`` to suppress states that
+    the user already chose elsewhere (Other excludes Active selections).
+
+    Emits ``selection_changed(set[str])`` whenever the selection changes so
+    the parent form can react (e.g., refresh a downstream rating table).
+    """
+
+    selection_changed = Signal(set)
+
+    def __init__(
+        self,
+        tag: str,
+        emit_cb,
+        *,
+        include_all_other: bool = False,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self._tag = tag
+        self._emit_cb = emit_cb
+        self._include_all_other = bool(include_all_other)
+        self._selected: set[str] = set()
+        self._excluded: set[str] = set()
+        self._popup: QListWidget | None = None
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        self._btn = QPushButton("(none selected)")
+        self._btn.setObjectName("StatesMultiSelectBtn")
+        self._btn.setStyleSheet(
+            "QPushButton#StatesMultiSelectBtn {"
+            "  text-align: left; padding: 4px 8px; "
+            "  border: 1px solid #cbd5e1; border-radius: 3px;"
+            "  background: white; color: #0f172a; min-height: 22px;"
+            "}"
+            "QPushButton#StatesMultiSelectBtn:hover { border-color: #2563eb; }"
+        )
+        self._btn.clicked.connect(self._open_popup)
+        layout.addWidget(self._btn, 1)
+
+    # -- QLineEdit-like interface for SectionFormBase.refresh() --------------
+
+    def setText(self, v: str) -> None:
+        tokens = [t.strip().upper() for t in (v or "").split(",") if t.strip()]
+        self._selected = set(tokens)
+        self._update_button()
+
+    def text(self) -> str:
+        return ",".join(self._ordered_selected())
+
+    # -- Sibling-widget coordination -----------------------------------------
+
+    def set_excluded(self, excluded: set[str]) -> None:
+        """States that are unavailable in this picker (already chosen elsewhere).
+
+        Any state in ``excluded`` that is currently selected here is silently
+        deselected — we don't want both pickers claiming the same state.
+        """
+        self._excluded = {c.upper() for c in excluded}
+        removed = self._selected & self._excluded
+        if removed:
+            self._selected -= removed
+            self._update_button()
+            self._emit()
+
+    # -- Internals -----------------------------------------------------------
+
+    def _ordered_selected(self) -> list[str]:
+        """Selected codes in canonical order: ALL OTHER first if present,
+        then 2-letter codes alphabetically."""
+        codes = sorted(c for c in self._selected if c in _US_STATE_CODES)
+        if ALL_OTHER_STATES_TOKEN in self._selected:
+            return [ALL_OTHER_STATES_TOKEN] + codes
+        return codes
+
+    def _update_button(self) -> None:
+        ordered = self._ordered_selected()
+        if not ordered:
+            self._btn.setText("(none selected)")
+        elif len(ordered) <= 6:
+            # Show codes inline when the list fits.
+            self._btn.setText(", ".join(
+                "All Other" if c == ALL_OTHER_STATES_TOKEN else c
+                for c in ordered
+            ))
+        else:
+            self._btn.setText(f"{len(ordered)} selected")
+
+    def _emit(self) -> None:
+        value = ",".join(self._ordered_selected())
+        self._emit_cb(self._tag, value or None)
+        self.selection_changed.emit(set(self._selected))
+
+    def _open_popup(self) -> None:
+        if self._popup is not None:
+            self._popup.close()
+            self._popup = None
+
+        popup = QListWidget()
+        popup.setWindowFlags(Qt.WindowType.Popup)
+        popup.setStyleSheet(
+            "QListWidget { border: 1px solid #94a3b8; background: white; }"
+            "QListWidget::item { padding: 4px 6px; }"
+            "QListWidget::item:hover { background: #eff6ff; }"
+        )
+
+        # Ordering inside the popup: special "All Other" first (if enabled),
+        # then selected states alphabetically, then remaining states.
+        if self._include_all_other:
+            item = QListWidgetItem("All Other")
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            item.setCheckState(
+                Qt.CheckState.Checked
+                if ALL_OTHER_STATES_TOKEN in self._selected
+                else Qt.CheckState.Unchecked
+            )
+            item.setData(Qt.ItemDataRole.UserRole, ALL_OTHER_STATES_TOKEN)
+            font = item.font()
+            font.setBold(True)
+            item.setFont(font)
+            popup.addItem(item)
+
+        available = [
+            (code, name) for code, name in _US_STATES if code not in self._excluded
+        ]
+        selected_avail = [t for t in available if t[0] in self._selected]
+        remaining = [t for t in available if t[0] not in self._selected]
+        for code, name in selected_avail + remaining:
+            item = QListWidgetItem(f"{code} — {name}")
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            item.setCheckState(
+                Qt.CheckState.Checked
+                if code in self._selected
+                else Qt.CheckState.Unchecked
+            )
+            item.setData(Qt.ItemDataRole.UserRole, code)
+            popup.addItem(item)
+
+        def on_item_changed(item: QListWidgetItem) -> None:
+            code = item.data(Qt.ItemDataRole.UserRole)
+            checked = item.checkState() == Qt.CheckState.Checked
+            if checked:
+                self._selected.add(code)
+            else:
+                self._selected.discard(code)
+            self._update_button()
+            self._emit()
+
+        popup.itemChanged.connect(on_item_changed)
+
+        # Anchor under the button.
+        gpos = self._btn.mapToGlobal(self._btn.rect().bottomLeft())
+        popup.move(gpos)
+        popup.resize(max(self._btn.width(), 240), 360)
+        popup.show()
+        self._popup = popup
+
+
 class _SymbolWidget(QWidget):
     """Checkbox grid for EPIC auto coverage symbols, plus an 'Other' free-text
     field for state-specific or rare endorsement-driven symbols.
@@ -1780,25 +1983,43 @@ class InlandMarineForm(SectionFormBase):
 
 
 class WorkersCompForm(SectionFormBase):
-    """Worker's Compensation — no Additional Coverages, no Additional Interests."""
+    """Worker's Compensation.
+
+    Layout (top → bottom):
+      - "Worker's Compensation" header
+      - "Part 1 - Active States" sub-header + multi-select picker
+      - "Employers Liability Limits" sub-header + three limit inputs
+      - "Other States" sub-header + multi-select picker (with "All Other")
+        that excludes any state already chosen as Active
+      - "Rating Information" sub-header + per-state table (Experience Mod,
+        Scheduled Rating, Deductible) that auto-syncs with the union of
+        Active + Other selections
+      - Class Codes table, Forms table, Additional Coverages table
+    """
 
     REPEATABLE_GROUP = "policy.workers_comp.class_code"
+    RATING_INFO_GROUP = "policy.workers_comp.rating_info"
 
     def _build_form(self) -> None:
         self._root.addWidget(self._hdr("Worker's Compensation"))
-        g = self._grid(2)
-        # Policy Number / Period / premiums intentionally omitted per UX request.
-        # Statutory limits is encoded in EPIC as `part1_states` (Part One
-        # statutory states list); we surface it as a free-text input so the
-        # operator can confirm the state list directly.
-        self._add_text(g, 0, 0, "Statutory States (Part One)",
-                       "policy.workers_comp.part1_states")
-        self._add_text(g, 0, 1, "Deductible",
-                       "policy.workers_comp.deductibles", "$")
-        self._root.addLayout(g)
 
+        # -- Part 1 — Active States ------------------------------------------
+        self._root.addWidget(self._sub_hdr("Part 1 - Active States"))
+        active_tag = "policy.workers_comp.part1_states"
+        self._active_states_w = _StatesMultiSelectWidget(
+            active_tag,
+            self.field_changed.emit,
+            include_all_other=False,
+        )
+        sv = _val(self._state, active_tag)
+        if sv:
+            self._active_states_w.setText(sv)
+        self._inputs[active_tag] = self._active_states_w
+        self._root.addWidget(self._active_states_w)
+
+        # -- Employers Liability Limits --------------------------------------
         self._root.addWidget(_hr())
-        self._root.addWidget(self._hdr("Employer Liability"))
+        self._root.addWidget(self._sub_hdr("Employers Liability Limits"))
         el = self._grid(2)
         self._add_text(el, 0, 0, "Each Accident",
                        "policy.workers_comp.each_accident", "$")
@@ -1808,18 +2029,59 @@ class WorkersCompForm(SectionFormBase):
                        "policy.workers_comp.disease_each_employee", "$")
         self._root.addLayout(el)
 
+        # -- Other States ----------------------------------------------------
+        # Mapped to `policy.workers_comp.part3_states` — Part 3 in standard
+        # WC parlance is "Other States Insurance", which is exactly what
+        # this picker captures.
         self._root.addWidget(_hr())
-        self._root.addWidget(self._hdr("Experience Rating"))
-        exp_g = self._grid(2)
-        self._add_text(exp_g, 0, 0, "Experience Mod",
-                       "policy.workers_comp.experience_mod", "e.g. 0.87")
-        self._root.addLayout(exp_g)
+        self._root.addWidget(self._sub_hdr("Other States"))
+        other_tag = "policy.workers_comp.part3_states"
+        self._other_states_w = _StatesMultiSelectWidget(
+            other_tag,
+            self.field_changed.emit,
+            include_all_other=True,
+        )
+        ov = _val(self._state, other_tag)
+        if ov:
+            self._other_states_w.setText(ov)
+        self._inputs[other_tag] = self._other_states_w
+        self._root.addWidget(self._other_states_w)
 
+        # Active selection drives Other's exclusion list. Initial sync from
+        # the loaded state, then live updates as Active changes.
+        self._sync_other_exclusion()
+        self._active_states_w.selection_changed.connect(
+            lambda _codes: self._sync_other_exclusion()
+        )
+        # Both selections drive the Rating Information table contents.
+        self._active_states_w.selection_changed.connect(
+            lambda _codes: self._refresh_rating_table()
+        )
+        self._other_states_w.selection_changed.connect(
+            lambda _codes: self._refresh_rating_table()
+        )
+
+        # -- Rating Information ----------------------------------------------
+        self._root.addWidget(_hr())
+        self._root.addWidget(self._sub_hdr("Rating Information"))
+        self._rating_tbl = self._table(
+            4, ["State", "Experience Mod", "Scheduled Rating", "Deductible"],
+        )
+        self._rating_tbl.setColumnWidth(0, 90)
+        self._rating_tbl.setColumnWidth(1, 130)
+        self._rating_tbl.setColumnWidth(2, 130)
+        self._rating_tbl.horizontalHeader().setSectionResizeMode(
+            3, QHeaderView.ResizeMode.Stretch
+        )
+        self._rating_tbl.setMinimumHeight(_TBL_HEIGHT_6_ROWS)
+        self._rating_tbl.cellChanged.connect(self._on_rating_cell_changed)
+        self._root.addWidget(self._rating_tbl, 1)
+
+        # -- Class Codes (existing repeatable, unchanged) --------------------
         self._root.addWidget(_hr())
         self._root.addLayout(
             self._section_row("Class Codes", "+ Add Class Code", self.REPEATABLE_GROUP)
         )
-        # State column included so multi-state policies can be captured.
         self._cc_tags: list[str | None] = [
             f"{self.REPEATABLE_GROUP}.state",
             f"{self.REPEATABLE_GROUP}.class_code",
@@ -1846,14 +2108,120 @@ class WorkersCompForm(SectionFormBase):
         self._root.addWidget(self._add_cov_tbl)
         self._refresh_tables(self._state)
 
+    def _sub_hdr(self, text: str) -> QLabel:
+        """Sub-header label (smaller than ``_hdr``, used inside a coverage
+        section to label sub-groups like 'Part 1 - Active States')."""
+        lbl = QLabel(text)
+        lbl.setStyleSheet(
+            "font-weight: 600; font-size: 12px; color: #334155;"
+            " padding-top: 4px; padding-bottom: 2px;"
+        )
+        return lbl
+
+    def _selected_state_codes(self) -> list[str]:
+        """Active states first, then Other-specific states, then 'All Other'
+        if checked. Returns the canonical display order for the rating table.
+        """
+        if not hasattr(self, "_active_states_w"):
+            return []
+        active = [c for c in self._active_states_w._ordered_selected()
+                  if c in _US_STATE_CODES]
+        other_all = self._other_states_w._ordered_selected()
+        other_states = [c for c in other_all if c in _US_STATE_CODES and c not in active]
+        ordered: list[str] = active + other_states
+        if ALL_OTHER_STATES_TOKEN in other_all:
+            ordered.append(ALL_OTHER_STATES_TOKEN)
+        return ordered
+
+    def _sync_other_exclusion(self) -> None:
+        active_codes = {
+            c for c in self._active_states_w._ordered_selected()
+            if c in _US_STATE_CODES
+        }
+        self._other_states_w.set_excluded(active_codes)
+
+    # -- Rating Information table -------------------------------------------
+
+    _RATING_COLUMN_TAGS: tuple[str, str, str] = (
+        "experience_mod",
+        "scheduled_rating",
+        "deductible",
+    )
+
+    def _refresh_rating_table(self) -> None:
+        if not hasattr(self, "_rating_tbl"):
+            return
+        ordered = self._selected_state_codes()
+        # Index existing rating-info items by state code so display rows can
+        # pull pre-existing values.
+        items = _rep(self._state, self.RATING_INFO_GROUP)
+        by_state: dict[str, dict] = {}
+        for item in items:
+            rec = item.get(f"{self.RATING_INFO_GROUP}.state")
+            if isinstance(rec, dict):
+                code = str(rec.get("value") or "").strip().upper()
+                if code:
+                    by_state[code] = item
+
+        self._rating_tbl._iga_block = True
+        try:
+            self._rating_tbl.setRowCount(len(ordered))
+            for r, code in enumerate(ordered):
+                state_label = (
+                    "All Other" if code == ALL_OTHER_STATES_TOKEN else code
+                )
+                state_cell = QTableWidgetItem(state_label)
+                state_cell.setFlags(state_cell.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                state_cell.setData(Qt.ItemDataRole.UserRole, code)
+                self._rating_tbl.setItem(r, 0, state_cell)
+                item = by_state.get(code, {})
+                for c, suffix in enumerate(self._RATING_COLUMN_TAGS, start=1):
+                    rec = item.get(f"{self.RATING_INFO_GROUP}.{suffix}")
+                    v = ""
+                    if isinstance(rec, dict):
+                        v = str(rec.get("value") or "")
+                    self._rating_tbl.setItem(r, c, QTableWidgetItem(v))
+        finally:
+            self._rating_tbl._iga_block = False
+        self._autofit_columns(self._rating_tbl)
+
+    def _on_rating_cell_changed(self, row: int, col: int) -> None:
+        if getattr(self._rating_tbl, "_iga_block", False):
+            return
+        if col == 0:
+            return  # State column is read-only display.
+        if not (1 <= col <= 3):
+            return
+        state_cell = self._rating_tbl.item(row, 0)
+        if state_cell is None:
+            return
+        state_code = state_cell.data(Qt.ItemDataRole.UserRole)
+        if not state_code:
+            return
+        val_cell = self._rating_tbl.item(row, col)
+        value = val_cell.text().strip() if val_cell else ""
+        suffix = self._RATING_COLUMN_TAGS[col - 1]
+        full_tag = f"{self.RATING_INFO_GROUP}.{suffix}"
+        # Emit the upsert-by-state protocol so the host creates the row on
+        # first edit if no rating_info item exists for this state yet.
+        self.field_changed.emit(
+            f"__upsert_by_state:{self.RATING_INFO_GROUP}:{state_code}:{full_tag}",
+            value or None,
+        )
+
     def _refresh_tables(self, state: dict | None) -> None:
         if not hasattr(self, "_cc_tbl"):
             return
+        # Class codes (existing behavior).
         items = _rep(state, self.REPEATABLE_GROUP)
         self._cc_tbl.setRowCount(len(items))
         for r, item in enumerate(items):
             self._populate_row(self._cc_tbl, r, self._cc_tags, item, row_num=True)
         self._autofit_columns(self._cc_tbl)
+        # Rating-info table tracks the multi-select widgets, which the base
+        # `refresh()` has already updated via setText.
+        self._sync_other_exclusion()
+        self._refresh_rating_table()
         self._refresh_forms_table(state)
         self._refresh_cov_table(state)
 

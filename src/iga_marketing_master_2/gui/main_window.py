@@ -2035,6 +2035,24 @@ class MainWindow(QMainWindow):
             self._update_repeatable_field(group, idx, tag, value)
             self._refresh_run_controls()
             return
+        if domain_tag.startswith("__upsert_by_state:"):
+            # Encoded as ``__upsert_by_state:<group>:<state_code>:<full_tag>``.
+            # Looks for an existing item in `state.repeatables[group]` whose
+            # `{group}.state` value matches state_code (case-insensitive);
+            # creates one if none exists, then sets `full_tag` to `value`.
+            # Used by WorkersCompForm's per-state Rating Information table
+            # where rows are keyed by state, not by index.
+            payload = domain_tag[len("__upsert_by_state:"):]
+            parts = payload.split(":", 2)
+            if len(parts) != 3:
+                _logger.warning("malformed __upsert_by_state: token: %r", domain_tag)
+                return
+            group, state_code, tag = parts
+            if self._client is None:
+                return
+            self._upsert_repeatable_by_state(group, state_code, tag, value)
+            self._refresh_run_controls()
+            return
         if self._client is None:
             return
         self._update_field(domain_tag, value)
@@ -2069,6 +2087,62 @@ class MainWindow(QMainWindow):
         else:
             item[tag] = {"value": value, "status": "edited", "conflicts": []}
         # Persist via the same path singleton edits use.
+        self._persist_state()
+
+    def _upsert_repeatable_by_state(
+        self, group: str, state_code: str, tag: str, value: object
+    ) -> None:
+        """Upsert into a repeatable group keyed by ``{group}.state``.
+
+        Used by Workers Comp's Rating Information table. The display has
+        one row per selected state (Active ∪ Other ∪ "ALL OTHER"), but the
+        underlying state.repeatables may not yet have a row for every
+        selected state. When the operator edits any cell, this helper
+        finds-or-creates the row keyed by state code and writes the value.
+        """
+        if self._client is None:
+            return
+        state = self._client.state
+        reps = state.setdefault("repeatables", {})
+        items = reps.setdefault(group, [])
+        if not isinstance(items, list):
+            return
+        state_tag = f"{group}.state"
+        wanted = (state_code or "").strip().upper()
+        target_idx: int | None = None
+        for i, item in enumerate(items):
+            if not isinstance(item, dict):
+                continue
+            rec = item.get(state_tag)
+            if isinstance(rec, dict):
+                v = str(rec.get("value") or "").strip().upper()
+                if v == wanted:
+                    target_idx = i
+                    break
+        if target_idx is None:
+            # Create a new item carrying the state field, then drop in the
+            # edited field. confidence=1.0 / status="edited" mirrors what
+            # _update_repeatable_field does for operator-originated edits.
+            new_item: dict = {
+                state_tag: {
+                    "value": state_code,
+                    "status": "edited",
+                    "confidence": 1.0,
+                    "source": [],
+                    "conflicts": [],
+                    "history": [],
+                },
+            }
+            items.append(new_item)
+            target_idx = len(items) - 1
+        item = items[target_idx]
+        rec = item.get(tag)
+        if isinstance(rec, dict):
+            rec["value"] = value
+            rec["status"] = "edited"
+            rec["conflicts"] = []
+        else:
+            item[tag] = {"value": value, "status": "edited", "conflicts": []}
         self._persist_state()
 
     def _build_singleton_tab(self, key: str) -> QWidget:

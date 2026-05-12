@@ -591,6 +591,13 @@ def _wc_class_code_key(item: RepeatableItem) -> str | None:
     return None
 
 
+def _wc_rating_info_key(item: RepeatableItem) -> str | None:
+    # Per-state rating row: keyed on the state code. The "ALL OTHER" sentinel
+    # is its own row. Without a state code we have no identity.
+    code = _norm(_value_of(item, "policy.workers_comp.rating_info.state"))
+    return code or None
+
+
 def _im_scheduled_item_key(item: RepeatableItem) -> str | None:
     serial = _norm(_value_of(item, "policy.inland_marine.scheduled_item.serial_number"))
     # Exclude placeholder serial numbers that carry no identifying information.
@@ -681,6 +688,7 @@ _NATURAL_KEY_FUNCS: dict[str, Any] = {
     "policy.gl.hazard": _gl_hazard_key,
     "policy.property.subject": _property_subject_key,
     "policy.workers_comp.class_code": _wc_class_code_key,
+    "policy.workers_comp.rating_info": _wc_rating_info_key,
     "policy.inland_marine.scheduled_item": _im_scheduled_item_key,
     "policy.inland_marine.unscheduled_item": _im_unscheduled_item_key,
     "policy.umbrella.underlying.other": _umbrella_underlying_other_key,

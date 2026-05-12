@@ -14103,7 +14103,7 @@
         "maxlength": 70,
         "domain_tag": "policy.workers_comp.part1_states",
         "aliases": [],
-        "notes_for_claude": null,
+        "notes_for_claude": "Part One (Active States) of the WC policy: the states in which the policy provides statutory workers' compensation coverage. Emit as a comma-separated list of USPS 2-letter state codes in uppercase (e.g. 'TN,KY,NC'). Found on the WC dec page typically labeled '3.A. Workers' Compensation Insurance', 'Part One', or 'Item 3.A. States'. Do NOT include states that only appear under Part Three / Other States Insurance — those go in policy.workers_comp.part3_states.",
         "domain_tag_status": "verified"
       },
       {
@@ -14163,7 +14163,59 @@
         "maxlength": 70,
         "domain_tag": "policy.workers_comp.part3_states",
         "aliases": [],
-        "notes_for_claude": null,
+        "notes_for_claude": "Part Three (Other States Insurance) of the WC policy: states where coverage extends if the insured begins operations during the policy period. Emit as a comma-separated list of USPS 2-letter state codes in uppercase (e.g. 'AL,GA,SC'). If the policy lists 'All states except those shown in Item 3.A' or 'All States Other Than Those Listed Above' (a common wildcard on WC dec pages), emit the literal string 'ALL OTHER' (without quotes) in addition to any specifically-named states. Do NOT repeat states already in policy.workers_comp.part1_states.",
+        "domain_tag_status": "verified"
+      },
+      {
+        "type": "text",
+        "label": "Rating Info State",
+        "name": "synthetic_RatingInfo_State",
+        "required": false,
+        "format": "synthetic",
+        "is_repeatable": true,
+        "repeatable_group": "policy.workers_comp.rating_info",
+        "domain_tag": "policy.workers_comp.rating_info.state",
+        "aliases": [],
+        "notes_for_claude": "Per-state row identifier for the Rating Information table. Emit a USPS 2-letter state code in uppercase (e.g. 'TN'), or the literal 'ALL OTHER' if the dec page applies a single experience mod / scheduled rating / deductible to all unlisted states. One row per state that has at least one of experience_mod, scheduled_rating, or deductible.",
+        "domain_tag_status": "verified"
+      },
+      {
+        "type": "text",
+        "label": "Rating Info Experience Mod",
+        "name": "synthetic_RatingInfo_ExperienceMod",
+        "required": false,
+        "format": "synthetic",
+        "is_repeatable": true,
+        "repeatable_group": "policy.workers_comp.rating_info",
+        "domain_tag": "policy.workers_comp.rating_info.experience_mod",
+        "aliases": [],
+        "notes_for_claude": "Per-state experience modification factor (e-mod / x-mod). Emit as a decimal (e.g. '0.87' or '1.15'). Match it to the row whose state code matches the carrier's per-state mod listing. If only ONE mod is shown and the policy covers one state, use that state's row. Do not emit if not explicitly shown for that state.",
+        "domain_tag_status": "verified"
+      },
+      {
+        "type": "text",
+        "label": "Rating Info Scheduled Rating",
+        "name": "synthetic_RatingInfo_ScheduledRating",
+        "required": false,
+        "format": "synthetic",
+        "is_repeatable": true,
+        "repeatable_group": "policy.workers_comp.rating_info",
+        "domain_tag": "policy.workers_comp.rating_info.scheduled_rating",
+        "aliases": [],
+        "notes_for_claude": "Per-state scheduled rating credit/debit. Emit as a percentage with sign (e.g. '-5%', '+10%', '0%') or a decimal multiplier as printed (e.g. '0.95'). Found on the WC dec page or premium worksheet typically labeled 'Schedule Rating Modification', 'Schedule Rating', or 'Sched Mod'. Do not emit if not shown.",
+        "domain_tag_status": "verified"
+      },
+      {
+        "type": "text",
+        "label": "Rating Info Deductible",
+        "name": "synthetic_RatingInfo_Deductible",
+        "required": false,
+        "format": "synthetic",
+        "is_repeatable": true,
+        "repeatable_group": "policy.workers_comp.rating_info",
+        "domain_tag": "policy.workers_comp.rating_info.deductible",
+        "aliases": [],
+        "notes_for_claude": "Per-state WC deductible amount. Emit as a dollar amount as printed (e.g. '$1,000', '5000'). Found on the WC dec page typically under a 'Deductible' column or 'Deductible Endorsement' section. Multi-state policies sometimes list a single deductible applied to all states — in that case put it on the 'ALL OTHER' row, OR on each state row, as the document shows it.",
         "domain_tag_status": "verified"
       },
       {
