@@ -1,7 +1,7 @@
 """section_forms.py — Purpose-built form widgets for each insurance coverage section."""
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QEvent, QObject, Qt, Signal
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -1145,14 +1145,34 @@ class _StatesMultiSelectWidget(QWidget):
 
         popup = QListWidget()
         popup.setWindowFlags(Qt.WindowType.Popup)
+        # Explicit colors at every state — Qt's default selected/hover style
+        # inverts to white text, which made checked items vanish against
+        # white backgrounds. Forcing dark foreground for normal, selected,
+        # and hover states keeps the labels readable in all three states.
         popup.setStyleSheet(
-            "QListWidget { border: 1px solid #94a3b8; background: white; }"
-            "QListWidget::item { padding: 4px 6px; }"
-            "QListWidget::item:hover { background: #eff6ff; }"
+            "QListWidget {"
+            "  border: 1px solid #94a3b8;"
+            "  background: white;"
+            "  color: #0f172a;"
+            "  outline: 0;"
+            "}"
+            "QListWidget::item {"
+            "  padding: 4px 8px;"
+            "  color: #0f172a;"
+            "}"
+            "QListWidget::item:selected {"
+            "  background: #dbeafe;"
+            "  color: #0f172a;"
+            "}"
+            "QListWidget::item:hover {"
+            "  background: #eff6ff;"
+            "  color: #0f172a;"
+            "}"
         )
 
         # Ordering inside the popup: special "All Other" first (if enabled),
         # then selected states alphabetically, then remaining states.
+        dark = QColor("#0f172a")
         if self._include_all_other:
             item = QListWidgetItem("All Other")
             item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
@@ -1162,6 +1182,7 @@ class _StatesMultiSelectWidget(QWidget):
                 else Qt.CheckState.Unchecked
             )
             item.setData(Qt.ItemDataRole.UserRole, ALL_OTHER_STATES_TOKEN)
+            item.setForeground(dark)
             font = item.font()
             font.setBold(True)
             item.setFont(font)
@@ -1181,6 +1202,9 @@ class _StatesMultiSelectWidget(QWidget):
                 else Qt.CheckState.Unchecked
             )
             item.setData(Qt.ItemDataRole.UserRole, code)
+            # Set foreground explicitly per-item so it survives any
+            # cascading parent QSS that would otherwise blank the text.
+            item.setForeground(dark)
             popup.addItem(item)
 
         def on_item_changed(item: QListWidgetItem) -> None:
@@ -1195,12 +1219,32 @@ class _StatesMultiSelectWidget(QWidget):
 
         popup.itemChanged.connect(on_item_changed)
 
+        # Click-outside-to-close: install an event filter so we close on
+        # FocusOut. Qt.Popup is supposed to close on outside click natively,
+        # but on Windows that detection sometimes misses when focus moves
+        # to another widget within the same app — the user has to click
+        # outside the entire app to dismiss. The FocusOut hook fires
+        # whenever focus leaves the popup, which covers every case.
+        popup.installEventFilter(self)
+
         # Anchor under the button.
         gpos = self._btn.mapToGlobal(self._btn.rect().bottomLeft())
         popup.move(gpos)
         popup.resize(max(self._btn.width(), 240), 360)
         popup.show()
+        # Make the popup the active window AND give it keyboard focus so
+        # Qt.Popup's outside-click tracking and our FocusOut filter both fire.
+        popup.activateWindow()
+        popup.setFocus(Qt.FocusReason.PopupFocusReason)
         self._popup = popup
+
+    def eventFilter(self, obj: QObject, event: QEvent) -> bool:
+        """Close the popup when it loses focus (user clicked outside)."""
+        if self._popup is not None and obj is self._popup:
+            if event.type() == QEvent.Type.FocusOut:
+                self._popup.close()
+                self._popup = None
+        return super().eventFilter(obj, event)
 
 
 class _SymbolWidget(QWidget):
@@ -2153,11 +2197,11 @@ class WorkersCompForm(SectionFormBase):
         self._active_states_w.selection_changed.connect(
             lambda _codes: self._sync_other_exclusion()
         )
-        # Both selections drive the Rating Information table contents.
+        # Only Active States drive the Rating Information table contents.
+        # Other States Insurance (Part 3) is a contingency placeholder and
+        # doesn't carry its own experience mod / scheduled rating /
+        # deductible, so changes to that picker don't refresh the table.
         self._active_states_w.selection_changed.connect(
-            lambda _codes: self._refresh_rating_table()
-        )
-        self._other_states_w.selection_changed.connect(
             lambda _codes: self._refresh_rating_table()
         )
 
@@ -2219,19 +2263,18 @@ class WorkersCompForm(SectionFormBase):
         return lbl
 
     def _selected_state_codes(self) -> list[str]:
-        """Active states first, then Other-specific states, then 'All Other'
-        if checked. Returns the canonical display order for the rating table.
+        """States that appear in the Rating Information table.
+
+        Only Active States (Part 1) are surfaced. Other States Insurance
+        (Part 3) doesn't carry per-state rating data, and the "All Other"
+        sentinel never gets its own rating row.
         """
         if not hasattr(self, "_active_states_w"):
             return []
-        active = [c for c in self._active_states_w._ordered_selected()
-                  if c in _US_STATE_CODES]
-        other_all = self._other_states_w._ordered_selected()
-        other_states = [c for c in other_all if c in _US_STATE_CODES and c not in active]
-        ordered: list[str] = active + other_states
-        if ALL_OTHER_STATES_TOKEN in other_all:
-            ordered.append(ALL_OTHER_STATES_TOKEN)
-        return ordered
+        return [
+            c for c in self._active_states_w._ordered_selected()
+            if c in _US_STATE_CODES
+        ]
 
     def _sync_other_exclusion(self) -> None:
         active_codes = {
