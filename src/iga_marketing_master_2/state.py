@@ -476,18 +476,81 @@ def _policy_auto_driver_key(item: RepeatableItem) -> str | None:
     return None
 
 
+def _norm_address(v: PrimitiveValue) -> str:
+    """Normalize a street address for cross-document comparison.
+
+    Same address written differently across PDFs ("120 Mockingbird Ave,
+    Henry, TN 38231-3830" vs "120 Mockingbird Avenue, Henry TN 38231")
+    must collapse to the same key. We do that by:
+
+    - lowercasing + whitespace collapse via ``_norm``
+    - stripping punctuation other than digits/letters/spaces/hyphen
+    - dropping the ZIP+4 suffix so "38231-3830" matches "38231"
+    - expanding the common street-suffix abbreviations (ave/avenue,
+      st/street, rd/road, blvd/boulevard, hwy/highway, ln/lane,
+      dr/drive, ct/court)
+
+    Returns "" if the input is None / empty.
+    """
+    if v is None:
+        return ""
+    s = _norm(v)  # lowercase + whitespace collapse
+    if not s:
+        return ""
+    # Drop the ZIP entirely (5-digit or ZIP+4). Same physical address often
+    # appears with the ZIP in one document and without it in another; keeping
+    # ZIP in the key would split those into separate location rows. The
+    # supplementary ZIP is recoverable from the original FieldRecord; only
+    # the comparison key drops it.
+    s = re.sub(r"\b\d{5}(?:-\d{4})?\b", "", s)
+    # Strip remaining punctuation. (Any hyphen left over is meaningful — e.g.,
+    # apartment ranges like "1320-A US Hwy" — keep it.)
+    s = re.sub(r"[^\w\s-]", " ", s)
+    # Expand the abbreviations the same direction every time so both forms
+    # land on the same string.
+    _ABBREV: dict[str, str] = {
+        "ave": "avenue",
+        "st": "street",
+        "rd": "road",
+        "blvd": "boulevard",
+        "hwy": "highway",
+        "ln": "lane",
+        "dr": "drive",
+        "ct": "court",
+        "pkwy": "parkway",
+    }
+    parts = s.split()
+    parts = [_ABBREV.get(p, p) for p in parts]
+    s = " ".join(parts)
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+
+
 def _location_key_actual(item: RepeatableItem) -> str | None:
-    # Try the canonical address tag, then fallbacks used in the section form.
-    addr = (
-        _norm(_value_of(item, "location.building_description"))
-        or _norm(_value_of(item, "location.address"))
-        or _norm(_value_of(item, "location.description"))
+    """Natural key for a `location` repeatable row.
+
+    Keyed on (normalized_address, building_number). Two rows at the same
+    address with different building numbers are DIFFERENT buildings — they
+    must not merge. Two rows at the same address with the SAME building
+    number (e.g., one doc has "Bldg 2 Storage", another mentions the same
+    building in a different context) must merge.
+
+    Returns ``None`` when no address is available — caller appends without
+    merge; ``_normalize_locations`` cleans up later.
+    """
+    addr = _norm_address(
+        _value_of(item, "location.building_description")
+        or _value_of(item, "location.address")
+        or _value_of(item, "location.description")
     )
+    if not addr:
+        return None
     bldg = (
         _norm(_value_of(item, "location.building_number"))
         or _norm(_value_of(item, "location.bldg_number"))
     )
-    return f"{addr}|{bldg}" if addr else None
+    # Missing bldg# defaults to "1" for keying — normalization pass renumbers.
+    return f"{addr}|{bldg or '1'}"
 
 
 def _account_named_insured_key(item: RepeatableItem) -> str | None:
@@ -1640,8 +1703,14 @@ def merge_extraction(
     for r in singletons:
         _merge_singleton(state, r, run_id, report)
 
+    location_touched = False
     for bucket in repeatable_buckets.values():
         _merge_repeatable(state, bucket, run_id, report)
+        if bucket and bucket[0].repeatable_group == "location":
+            location_touched = True
+
+    if location_touched:
+        _normalize_locations(state, run_id, report)
 
     logger.info(
         "merge_extraction run_id=%s created=%d updated=%d conflicts=%d "
@@ -1655,6 +1724,168 @@ def merge_extraction(
         report.appended_without_key,
     )
     return report
+
+
+def _set_normalized_field(
+    item: RepeatableItem,
+    tag: str,
+    new_value: str,
+    run_id: str,
+) -> bool:
+    """Set a field value on a repeatable item, preserving history.
+
+    Returns ``True`` if the value changed (or was newly created), ``False`` if
+    the existing value already matched. Used by ``_normalize_locations`` to
+    rewrite ``location.location_number`` / ``location.building_number`` after
+    address-based regrouping.
+    """
+    existing = item.get(tag)
+    if existing is not None and _norm(existing.value) == _norm(new_value):
+        return False
+    prior_snap = _record_snapshot(existing) if existing is not None else None
+    if existing is None:
+        rec = FieldRecord(
+            value=new_value,
+            confidence=1.0,
+            status="pending",
+            source=[],
+            conflicts=[],
+            history=[],
+            needs_review=False,
+            model_used="normalizer",
+        )
+        item[tag] = rec
+    else:
+        existing.value = new_value
+        rec = existing
+    rec.history.append(
+        HistoryEntry(
+            run_id=run_id,
+            ts=_now_iso(),
+            user="",
+            actor="extractor",
+            action="update" if prior_snap is not None else "create",
+            prior=prior_snap,
+            new=_record_snapshot(rec),
+        )
+    )
+    return True
+
+
+def _normalize_locations(
+    state: State,
+    run_id: str,
+    report: MergeReport,
+) -> None:
+    """Renumber location/building values after merge.
+
+    Why this exists: Claude's extraction often produces sloppy or absent
+    location/building numbering — it may emit ``building_number=2`` for the
+    first building of Location 2 (mirroring loc#), leave numbers blank
+    entirely, or split buildings at the same physical address across
+    different ``location_number`` values. This pass enforces the invariant
+    that "same street address = same location" and that building numbers
+    within a location start at 1 and increment in encounter order.
+
+    Algorithm:
+      1. Walk ``state.repeatables['location']`` in current order.
+      2. Drop items with no usable data (no address AND no other fields).
+      3. Group surviving items by ``_norm_address`` of the address tag.
+      4. Items with no address fall through as their own "no-address" group
+         AFTER all addressed locations (so they get high location_numbers
+         and the operator can fix manually).
+      5. Within each location group, sort items by their existing
+         ``building_number`` (numeric ascending, blanks last) so any
+         explicitly-labeled buildings keep their relative order.
+      6. Assign ``location_number`` = group ordinal (1-based), and
+         ``building_number`` = position within the group (1-based).
+      7. Records every rewrite in the item's per-field history.
+    """
+    items = state.repeatables.get("location")
+    if not items:
+        return
+
+    def _has_any_value(it: RepeatableItem) -> bool:
+        for rec in it.values():
+            if rec.value not in (None, ""):
+                return True
+        return False
+
+    # Drop ghost rows (no fields at all) — these are the "Loc 0 / Bldg 0"
+    # entries Claude produces when it couldn't find anything but still emitted
+    # a row.
+    survivors: list[RepeatableItem] = [it for it in items if _has_any_value(it)]
+    dropped = len(items) - len(survivors)
+    if dropped:
+        report.notes.append(
+            f"location: dropped {dropped} empty rows during normalization"
+        )
+
+    # Group by normalized address. Preserve first-seen order across addresses.
+    by_addr: dict[str, list[RepeatableItem]] = {}
+    addr_order: list[str] = []
+    no_addr: list[RepeatableItem] = []
+    for it in survivors:
+        addr = _norm_address(
+            _value_of(it, "location.building_description")
+            or _value_of(it, "location.address")
+            or _value_of(it, "location.description")
+        )
+        if not addr:
+            no_addr.append(it)
+            continue
+        if addr not in by_addr:
+            addr_order.append(addr)
+            by_addr[addr] = []
+        by_addr[addr].append(it)
+
+    def _existing_bldg_sort_key(it: RepeatableItem) -> tuple[int, str]:
+        raw = _value_of(it, "location.building_number") or _value_of(
+            it, "location.bldg_number"
+        )
+        s = str(raw).strip() if raw is not None else ""
+        try:
+            return (0, f"{int(s):08d}")
+        except (TypeError, ValueError):
+            return (1, _norm(s))
+
+    rewritten: list[RepeatableItem] = []
+    rewrites = 0
+    for loc_idx, addr in enumerate(addr_order, start=1):
+        group = sorted(by_addr[addr], key=_existing_bldg_sort_key)
+        for bldg_idx, it in enumerate(group, start=1):
+            if _set_normalized_field(
+                it, "location.location_number", str(loc_idx), run_id
+            ):
+                rewrites += 1
+            if _set_normalized_field(
+                it, "location.building_number", str(bldg_idx), run_id
+            ):
+                rewrites += 1
+            rewritten.append(it)
+    # No-address rows tail the list with their own location_number each, so the
+    # operator can see them in the GUI and either supply an address or delete.
+    for offset, it in enumerate(no_addr, start=1):
+        loc_idx = len(addr_order) + offset
+        if _set_normalized_field(
+            it, "location.location_number", str(loc_idx), run_id
+        ):
+            rewrites += 1
+        if _set_normalized_field(
+            it, "location.building_number", "1", run_id
+        ):
+            rewrites += 1
+        rewritten.append(it)
+
+    state.repeatables["location"] = rewritten
+    if rewrites or dropped:
+        logger.info(
+            "normalize_locations run_id=%s rewrites=%d dropped=%d locations=%d",
+            run_id,
+            rewrites,
+            dropped,
+            len(addr_order) + len(no_addr),
+        )
 
 
 # ---------------------------------------------------------------------------

@@ -308,6 +308,14 @@ class SectionFormBase(QScrollArea):
         self._root.setSpacing(14)
 
         self._build_form()
+        # Populate repeatable tables from initial state. Singleton inputs are
+        # filled inline by `_build_form` via `_val(self._state, tag)`, but
+        # QTableWidgets created in `_build_form` are empty until something
+        # calls `_refresh_tables`. Without this, hazards / vehicles / loss
+        # payees / etc. don't appear until the operator triggers another
+        # `_rebuild_tabs` pass (e.g., by editing a field). Mirroring what
+        # `refresh()` does here means the first paint already shows data.
+        self._refresh_tables(state)
         # Subclasses add final widget with stretch=1 — no trailing addStretch here.
 
     # -- Subclass interface --------------------------------------------------

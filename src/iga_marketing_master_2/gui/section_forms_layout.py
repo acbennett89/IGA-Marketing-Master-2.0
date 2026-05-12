@@ -58,7 +58,7 @@ NAMED_INSUREDS_COLUMNS: tuple[ColumnSpec, ...] = (
 # Locations tab
 # ---------------------------------------------------------------------------
 LOCATIONS_COLUMNS: tuple[ColumnSpec, ...] = (
-    ColumnSpec("Loc #",             "Commercial AP > Premise", "inteBuildingNumber"),
+    ColumnSpec("Loc #",             "Commercial AP > Premise", "synthetic_LocationNumber"),
     ColumnSpec("Bldg #",            "Commercial AP > Premise", "inteBuildingNumber"),
     # Address column. EPIC's `streBuildingDescription` typically holds the
     # full street address; if a separate description field exists in the

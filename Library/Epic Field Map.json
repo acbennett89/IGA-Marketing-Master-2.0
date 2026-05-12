@@ -1886,13 +1886,24 @@
     "fields": [
       {
         "type": "text",
+        "label": "Location #",
+        "name": "synthetic_LocationNumber",
+        "required": true,
+        "format": "synthetic",
+        "domain_tag": "location.location_number",
+        "aliases": [],
+        "notes_for_claude": "1-based number for the physical PREMISE / address. Multiple buildings at the SAME street address share the SAME location_number; each NEW street address gets the NEXT location_number. Examples: (a) Three buildings at 120 Mockingbird Ave -> all three rows get location_number=1, with building_number=1, 2, 3 respectively. (b) One building at 120 Mockingbird Ave and one at 234 Ross Sawmill Rd -> first row location_number=1 building_number=1, second row location_number=2 building_number=1. Always start building_number at 1 within each location. If the source document explicitly labels a row 'Location 4, Building 1', emit those exact values.",
+        "domain_tag_status": "verified"
+      },
+      {
+        "type": "text",
         "label": "Building #",
         "name": "inteBuildingNumber",
         "required": true,
         "format": "new",
         "domain_tag": "location.building_number",
         "aliases": [],
-        "notes_for_claude": null,
+        "notes_for_claude": "1-based building number WITHIN a single location. Always start at 1 for each new location_number. Examples: a location with three buildings -> building_number 1, 2, 3. A second location with one building -> building_number 1 (not 2). Do not let building_number mirror location_number (e.g., Location 3, Building 3) unless that location really does have at least 3 buildings.",
         "domain_tag_status": "verified"
       },
       {
