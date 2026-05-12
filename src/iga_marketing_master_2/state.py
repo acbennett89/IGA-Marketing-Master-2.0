@@ -1669,8 +1669,8 @@ def _merge_repeatable(
 
 
 def _validate_repeatable_namespace(records: list[ExtractedField]) -> None:
-    """Sanity check: a record marked repeatable_group=X must have a
-    domain_tag whose namespace prefix matches X.
+    """Sanity check + self-heal: a record marked repeatable_group=X must
+    have a domain_tag whose namespace prefix matches X.
 
     `repeatable_group` may be 1-3 segments per the locked registry:
       - 1-segment cross-LOB groups: 'location', 'prior_carrier', 'loss'
@@ -1680,18 +1680,51 @@ def _validate_repeatable_namespace(records: list[ExtractedField]) -> None:
                                     'policy.<lob>.additional_interest', etc.
 
     The domain_tag must start with `repeatable_group + "."` exactly.
+
+    Previously this raised StateMergeError on any mismatch, which would
+    abort the entire extraction run when Claude hallucinated even one
+    over-deepened group key (e.g. emitting
+    'policy.property.subject.coinsurance' as a group key when sub-field
+    tags like 'policy.property.subject.building_number' don't share that
+    prefix). Now the validator self-heals: drop the last dot-segment of
+    the erroneous group until the tag prefixes match, log a warning, and
+    proceed. Worst case (no valid prefix exists), demote to singleton.
     """
     for r in records:
         if r.repeatable_group is None:
             continue
-        expected_prefix = r.repeatable_group + "."
-        if not r.domain_tag.startswith(expected_prefix):
-            raise StateMergeError(
-                f"repeatable_group={r.repeatable_group!r} does not match "
-                f"namespace of domain_tag={r.domain_tag!r} "
-                f"(expected the tag to start with {expected_prefix!r}). "
-                f"See ARCHITECTURE.md §3 rule 5."
+        if r.domain_tag.startswith(r.repeatable_group + "."):
+            continue
+        # Trim the group from the right one segment at a time until it's
+        # a valid prefix of the domain_tag.
+        original = r.repeatable_group
+        parts = original.split(".")
+        corrected: str | None = None
+        while len(parts) > 1:
+            parts.pop()
+            candidate = ".".join(parts)
+            if r.domain_tag.startswith(candidate + "."):
+                corrected = candidate
+                break
+        if corrected is not None:
+            logger.warning(
+                "merge.repeatable_group_drift orig=%r derived=%r tag=%r — "
+                "auto-fixing (Claude emitted an over-deepened group key)",
+                original,
+                corrected,
+                r.domain_tag,
             )
+            r.repeatable_group = corrected
+        else:
+            # No prefix works — demote to singleton so the record still
+            # lands in state.fields instead of aborting the batch.
+            logger.warning(
+                "merge.repeatable_group_drop orig=%r tag=%r — emitting as "
+                "singleton (no canonical group prefix matches)",
+                original,
+                r.domain_tag,
+            )
+            r.repeatable_group = None
 
 
 def merge_extraction(

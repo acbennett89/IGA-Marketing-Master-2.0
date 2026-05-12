@@ -572,17 +572,39 @@ def test_natural_key_for_unknown_group_returns_none() -> None:
     assert natural_key_for("unknown_group", item) is None
 
 
-def test_repeatable_namespace_mismatch_raises(client_path: Path) -> None:
+def test_repeatable_namespace_mismatch_self_heals(client_path: Path) -> None:
+    """When repeatable_group doesn't prefix domain_tag, the validator
+    no longer raises — it trims the group from the right until a prefix
+    matches, or demotes to singleton when no prefix works. This lets a
+    Claude extraction run survive a hallucinated group key on one row
+    instead of aborting the whole batch.
+    """
     s = new_state(client_path.name)
-    bad = _make_extracted(
+    # Case 1: over-deepened group → trim to a valid prefix.
+    deepened = _make_extracted(
+        domain_tag="policy.property.subject.building_number",
+        value="1",
+        confidence=0.9,
+        repeatable_group="policy.property.subject.coinsurance",  # too deep
+        repeatable_index=0,
+    )
+    merge_extraction(s, [deepened], run_id="r1", model_used="sonnet-4-6")
+    # Record landed under the trimmed group, not the bogus one.
+    assert "policy.property.subject.coinsurance" not in s.repeatables
+    assert len(s.repeatables.get("policy.property.subject", [])) == 1
+
+    # Case 2: no valid prefix exists → demoted to singleton in state.fields.
+    unrelated = _make_extracted(
         domain_tag="vehicle.year",
         value=2020,
         confidence=0.9,
-        repeatable_group="driver",  # mismatch!
+        repeatable_group="driver",  # not a prefix of vehicle.year
         repeatable_index=0,
     )
-    with pytest.raises(state_module.StateMergeError):
-        merge_extraction(s, [bad], run_id="r", model_used="sonnet-4-6")
+    merge_extraction(s, [unrelated], run_id="r2", model_used="sonnet-4-6")
+    assert "driver" not in s.repeatables
+    assert "vehicle.year" in s.fields
+    assert s.fields["vehicle.year"].value == 2020
 
 
 # ---------------------------------------------------------------------------
