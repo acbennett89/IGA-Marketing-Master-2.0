@@ -25,10 +25,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from PySide6.QtCore import QObject, QSettings, QThread, QTimer, QUrl, Qt, Signal
-from PySide6.QtGui import QAction, QDesktopServices, QKeySequence
+from PySide6.QtCore import QObject, QSettings, QSize, QThread, QTimer, QUrl, Qt, Signal
+from PySide6.QtGui import QAction, QDesktopServices, QKeySequence, QMovie
 from PySide6.QtWidgets import (
     QApplication,
+    QDialog,
     QFileDialog,
     QFrame,
     QHBoxLayout,
@@ -999,6 +1000,85 @@ def _empty_state(client_name: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Extraction busy dialog
+# ---------------------------------------------------------------------------
+
+
+def _busy_gif_path() -> Path:
+    """Resolve assets/working.gif relative to this module so the lookup
+    works whether the package is installed editable or copied into a
+    build artifact."""
+    here = Path(__file__).resolve()
+    # main_window.py -> gui -> iga_marketing_master_2 -> src -> repo root
+    return here.parent.parent.parent.parent / "assets" / "working.gif"
+
+
+class _ExtractionBusyDialog(QDialog):
+    """Modal popup shown while an extraction run is in flight.
+
+    Plays ``assets/working.gif`` and shows a "Working..." label. The
+    operator can't dismiss it manually — only the host's
+    ``_on_extraction_finished`` / ``_on_extraction_failed`` slots call
+    ``close()`` on it when the worker thread reports completion.
+
+    The status-bar progress strip is unchanged; this dialog is the
+    obvious "the program is doing something, please wait" indicator
+    that sits inside the GUI on top of the main window.
+    """
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Extracting")
+        # No close button — the host owns the lifecycle.
+        self.setWindowFlag(Qt.WindowType.WindowCloseButtonHint, False)
+        self.setWindowFlag(Qt.WindowType.WindowContextHelpButtonHint, False)
+        self.setModal(True)
+        self.setFixedSize(320, 280)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 20, 20, 18)
+        layout.setSpacing(12)
+
+        self._movie: QMovie | None = None
+        gif_label = QLabel()
+        gif_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        gif_path = _busy_gif_path()
+        if gif_path.exists():
+            self._movie = QMovie(str(gif_path))
+            # Source is 800x600; scale down to fit the dialog while
+            # preserving aspect ratio.
+            self._movie.setScaledSize(QSize(240, 180))
+            gif_label.setMovie(self._movie)
+            self._movie.start()
+        else:
+            # Graceful fallback: if the asset is missing, fall back to text.
+            gif_label.setText("⏳")
+            gif_label.setStyleSheet("font-size: 48px;")
+        layout.addWidget(gif_label)
+
+        self._status_label = QLabel("Working...")
+        self._status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._status_label.setStyleSheet(
+            "font-size: 14px; font-weight: 600; color: #0f172a;"
+        )
+        layout.addWidget(self._status_label)
+
+    def set_status_text(self, text: str) -> None:
+        """Update the small status line under the GIF (e.g. 'Completed 3 of 7')."""
+        self._status_label.setText(text)
+
+    def closeEvent(self, event) -> None:
+        # Stop the movie so its timer stops firing when the dialog is hidden.
+        if self._movie is not None:
+            self._movie.stop()
+        super().closeEvent(event)
+
+    def reject(self) -> None:
+        # Ignore Esc / X / etc. — only the host calls close() / accept().
+        pass
+
+
+# ---------------------------------------------------------------------------
 # MainWindow
 # ---------------------------------------------------------------------------
 
@@ -1036,6 +1116,10 @@ class MainWindow(QMainWindow):
         self._client: _ClientContext | None = None
         self._worker_thread: QThread | None = None
         self._worker: _CallableWorker | None = None
+        # "Working..." modal that pops up while extraction is running.
+        # None when idle; populated by _show_busy_dialog and torn down by
+        # _close_busy_dialog in the worker's finished/failed slots.
+        self._busy_dialog: _ExtractionBusyDialog | None = None
         # Tracks which kind of run is in flight so the progress strip and
         # run-controls can clear themselves correctly on finish/fail.
         self._active_run_kind: str | None = None  # "extract" | "entry" | None
@@ -2597,6 +2681,7 @@ class MainWindow(QMainWindow):
         self._show_progress_determinate(
             f"Completed 0 of {pdf_count} — starting...", 0, pdf_count
         )
+        self._show_busy_dialog(f"Working... (0 of {pdf_count})")
         self._spawn_worker(
             task,
             on_finished=self._on_extraction_finished,
@@ -2606,6 +2691,7 @@ class MainWindow(QMainWindow):
     def _on_extraction_finished(self, _result: object) -> None:
         self._run_controls.set_extracting(False)
         self._active_run_kind = None
+        self._close_busy_dialog()
         self._hide_progress("Extraction complete.")
         if self._client is None:
             return
@@ -2617,6 +2703,7 @@ class MainWindow(QMainWindow):
     def _on_extraction_failed(self, message: str, technical: str) -> None:
         self._run_controls.set_extracting(False)
         self._active_run_kind = None
+        self._close_busy_dialog()
         self._hide_progress("Extraction didn't finish.")
         QMessageBox.warning(
             self,
@@ -2624,6 +2711,29 @@ class MainWindow(QMainWindow):
             f"{message}\n\nYour edits are saved. Try again, or check the audit log for details.",
         )
         _logger.error("extraction failed: %s | %s", message, technical)
+
+    # -- Busy dialog (extraction-in-progress popup) -------------------------
+
+    def _show_busy_dialog(self, status_text: str = "Working...") -> None:
+        """Pop up the working.gif modal dialog. Auto-closed by the
+        extraction-finished / extraction-failed slots."""
+        if self._busy_dialog is not None:
+            # Already up (rare — would only happen on a second-click race).
+            self._busy_dialog.set_status_text(status_text)
+            return
+        self._busy_dialog = _ExtractionBusyDialog(self)
+        self._busy_dialog.set_status_text(status_text)
+        # show() (not exec()) so the worker thread keeps running and our
+        # finished-slot can call .close() on the dialog later.
+        self._busy_dialog.show()
+
+    def _close_busy_dialog(self) -> None:
+        if self._busy_dialog is None:
+            return
+        dlg = self._busy_dialog
+        self._busy_dialog = None
+        dlg.close()
+        dlg.deleteLater()
 
     # -- Run controls (Begin Entry / Cancel / Resume) -----------------------
 
@@ -2996,15 +3106,23 @@ class MainWindow(QMainWindow):
     def _on_worker_progress(self, message: str, current: int, total: int) -> None:
         """Receive progress events from the active worker.
 
-        Updates the status-bar text + progress bar, and mirrors the
-        message into the audit log (the prior single-arg connection's
-        behavior).
+        Updates the status-bar text + progress bar, mirrors the message
+        into the audit log, and keeps the busy-dialog status line in
+        sync so the operator sees "Working... (3 of 7)" or whatever
+        phase the worker is reporting.
         """
         self._audit_log.append_event(message)
         if total > 0:
             self._show_progress_determinate(message, current, total)
         else:
             self._show_progress_indeterminate(message)
+        if self._busy_dialog is not None:
+            if total > 0:
+                self._busy_dialog.set_status_text(
+                    f"Working... ({current} of {total})"
+                )
+            else:
+                self._busy_dialog.set_status_text(message or "Working...")
 
     # -- Progress strip ----------------------------------------------------
 
