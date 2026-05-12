@@ -906,31 +906,52 @@ _CB_STYLE = (
 
 
 class _SymbolWidget(QWidget):
-    """3×3 checkbox grid for EPIC auto coverage symbols 1–9, plus an
-    'Other' checkbox with a free-text field for non-standard symbols.
+    """Checkbox grid for EPIC auto coverage symbols, plus an 'Other' free-text
+    field for state-specific or rare endorsement-driven symbols.
+
+    Each instance is configured with the symbol set that ISO CA 00 01 permits
+    for its coverage row (Liability gets 1–4, 7–9, 19; Physical Damage gets
+    2–4, 7–8; UM gets 2–4, 6, 7; etc.). Any symbol that arrives in state but
+    isn't in the configured allow-list is surfaced via "Other" so operators
+    see — and can correct — an out-of-scope value Claude extracted (e.g.,
+    Symbol 1 on Comp/Collision, which ISO doesn't allow).
 
     Mimics the QLineEdit interface (``setText`` / ``text``) so the base-class
     ``refresh()`` can update it like any other input widget.
     """
 
-    _SYMBOLS = ["1", "2", "3", "4", "5", "6", "7", "8", "9"]
+    # Falls back to the full ISO 1–9 set when no allow-list is passed. New
+    # callers should always pass the coverage-specific allow-list defined in
+    # ``BusinessAutoForm._build_form``.
+    _DEFAULT_SYMBOLS: tuple[str, ...] = ("1", "2", "3", "4", "5", "6", "7", "8", "9")
 
-    def __init__(self, tag: str, emit_cb, parent=None) -> None:
+    def __init__(
+        self,
+        tag: str,
+        emit_cb,
+        allowed: list[str] | None = None,
+        parent=None,
+    ) -> None:
         super().__init__(parent)
         self._tag = tag
         self._emit_cb = emit_cb
+        self._symbols: list[str] = (
+            list(allowed) if allowed else list(self._DEFAULT_SYMBOLS)
+        )
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(4)
 
-        # 3×3 grid for standard symbols.
+        # 3-column grid; row count derived from len(self._symbols). Sized so
+        # Liability (8) fills 3 rows, Physical Damage / UM (5) fills 2 rows,
+        # MedPay / Towing (4) fills 2 rows with a trailing gap.
         grid_w = QWidget()
         grid = QGridLayout(grid_w)
         grid.setContentsMargins(0, 0, 0, 0)
         grid.setSpacing(4)
         self._boxes: dict[str, QCheckBox] = {}
-        for i, s in enumerate(self._SYMBOLS):
+        for i, s in enumerate(self._symbols):
             cb = QCheckBox(s)
             cb.setStyleSheet(_CB_STYLE)
             self._boxes[s] = cb
@@ -960,7 +981,7 @@ class _SymbolWidget(QWidget):
         outer.addLayout(other_row)
 
     def _on_change(self) -> None:
-        parts = [s for s in self._SYMBOLS if self._boxes[s].isChecked()]
+        parts = [s for s in self._symbols if self._boxes[s].isChecked()]
         if self._other_cb.isChecked():
             extra = self._other_inp.text().strip()
             if extra:
@@ -969,7 +990,7 @@ class _SymbolWidget(QWidget):
 
     def setText(self, v: str) -> None:
         tokens = [s.strip() for s in v.split(",")] if v else []
-        standard = set(self._SYMBOLS)
+        standard = set(self._symbols)
         other_vals = [t for t in tokens if t not in standard]
         for s, cb in self._boxes.items():
             cb.blockSignals(True)
@@ -989,7 +1010,7 @@ class _SymbolWidget(QWidget):
         self._other_inp.blockSignals(False)
 
     def text(self) -> str:
-        parts = [s for s in self._SYMBOLS if self._boxes[s].isChecked()]
+        parts = [s for s in self._symbols if self._boxes[s].isChecked()]
         if self._other_cb.isChecked():
             extra = self._other_inp.text().strip()
             if extra:
@@ -1378,12 +1399,29 @@ class BusinessAutoForm(SectionFormBase):
         ba_grid.setColumnMinimumWidth(3, 160)
         ba_grid.setColumnStretch(5, 1)
 
+        # Per-coverage ISO CA 00 01 symbol allow-lists. Sources:
+        #   - rnc-pro.com CA 00 01 form analysis
+        #   - propertycasualty360.com "Business Auto Declarations and Coverage Symbols"
+        #   - insurancejournal.com "BAC 2+8+9 Do NOT Equal Symbol 1"
+        # Liability is the only coverage that gets Symbol 1 ("Any Auto") and
+        # the only one that gets 9 (nonowned) or 19 (mobile equipment).
+        # Symbol 5 is no-fault-only; Symbol 6 is UM-only.
+        # "Other" stays on every row for state-specific symbols (TN, NY, MI
+        # no-fault variants) and rare endorsement-driven codes.
+        LIAB_SYMS:   list[str] = ["1", "2", "3", "4", "7", "8", "9", "19"]
+        PHYS_SYMS:   list[str] = ["2", "3", "4", "7", "8"]   # Comp, SCoL, Collision
+        UM_SYMS:     list[str] = ["2", "3", "4", "6", "7"]
+        MEDPAY_SYMS: list[str] = ["2", "3", "4", "7"]
+        PIP_SYMS:    list[str] = ["2", "3", "4", "5", "7"]
+        TOWING_SYMS: list[str] = ["2", "3", "4", "7"]
+
         _gr = [0]  # mutable grid-row counter
 
         def _row(
             name: str,
             symbol_field: str,
             limit_pairs: list[tuple[str, str]],
+            allowed_symbols: list[str],
         ) -> None:
             start = _gr[0]
             n = len(limit_pairs)
@@ -1399,9 +1437,11 @@ class BusinessAutoForm(SectionFormBase):
             sym_hdr.setStyleSheet("color: #94a3b8; font-size: 10px;")
             ba_grid.addWidget(sym_hdr, start, 1, Qt.AlignmentFlag.AlignBottom)
 
-            # Symbol checkbox grid spans all limit sub-rows.
+            # Symbol checkbox grid spans all limit sub-rows. The allow-list
+            # restricts which checkboxes render; out-of-set values from state
+            # surface in the "Other" field so the operator can review them.
             tag = _resolve_tag(cov, symbol_field)
-            sym_w = _SymbolWidget(tag, self.field_changed.emit)
+            sym_w = _SymbolWidget(tag, self.field_changed.emit, allowed=allowed_symbols)
             sym_v = _val(self._state, tag)
             if sym_v:
                 sym_w.setText(sym_v)
@@ -1444,32 +1484,32 @@ class BusinessAutoForm(SectionFormBase):
             ("BI / Each Person",   "streLiabilityBILimit2"),
             ("BI / Each Accident", "streLiabilityBILimit1"),
             ("Property Damage",    "streLiabilityPDLimit1"),
-        ])
+        ], LIAB_SYMS)
         _row("Medical Payments",         "chkMedical2",        [
             ("Limit",              "streMedicalLimit1"),
-        ])
+        ], MEDPAY_SYMS)
         _row("Uninsured / Underinsured", "chkUninsured2",      [
             ("CSL",                "streUninsuredCSLLimit1"),
             ("BI / Each Person",   "streUninsuredBILimit2"),
             ("BI / Each Accident", "streUninsuredBILimit1"),
             ("PD / Each Accident", "streUninsuredPDEachAccident"),
             ("PD Deductible",      "streUninsuredPDDeductible"),
-        ])
+        ], UM_SYMS)
         _row("Comprehensive",            "chkComprehensive2",  [
             ("Deductible",         "streComprehensiveDeductible1"),
-        ])
+        ], PHYS_SYMS)
         _row("Specified Causes of Loss", "chkCauseOfLoss2",    [
             ("Deductible",         "streCauseOfLossDeductible1"),
-        ])
+        ], PHYS_SYMS)
         _row("Collision",                "chkCollision2",      [
             ("Deductible",         "streCollisionDeductible1"),
-        ])
+        ], PHYS_SYMS)
         _row("Towing & Labor",           "chkTowing3",         [
             ("Limit",              "streTowingLimit1"),
-        ])
+        ], TOWING_SYMS)
         _row("Personal Injury Protection", "chkPersonalInjury2", [
             ("Limit",              "strePersonalInjuryLimit1"),
-        ])
+        ], PIP_SYMS)
 
         ba_wrap = QWidget()
         ba_wrap.setLayout(ba_grid)
