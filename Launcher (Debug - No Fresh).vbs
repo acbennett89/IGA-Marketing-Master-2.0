@@ -2,7 +2,10 @@
 ' Launcher (Debug - No Fresh).vbs -- IGA Marketing Master 2.0
 ' ------------------------------------------------------------
 ' Same as Launcher (Debug).vbs but WITHOUT --fresh, so the
-' existing diagnostic client state is preserved across runs:
+' existing diagnostic client state is preserved across runs.
+' Like the Fresh variant this launcher uses python.exe (not
+' pythonw.exe) so the console stays visible and any startup
+' error / traceback / log output is immediately obvious.
 '
 '     1. --debug: verbose logs, raw Claude request/response,
 '        Playwright trace.zip + screenshots per entry action
@@ -23,14 +26,16 @@
 
 Option Explicit
 
-Dim shell, fso, projRoot, pythonw, workingLib, queuePdfs, cmd
+Dim shell, fso, projRoot, pythonExe, workingLib, queuePdfs, cmd
 Dim exitCode, response, msg
 
 Set shell = CreateObject("WScript.Shell")
 Set fso = CreateObject("Scripting.FileSystemObject")
 
 projRoot   = fso.GetParentFolderName(WScript.ScriptFullName)
-pythonw    = projRoot & "\.venv\Scripts\pythonw.exe"
+' Console-visible python.exe (not pythonw.exe) so the operator sees logs,
+' tracebacks, and startup errors when iterating on Debug-mode runs.
+pythonExe  = projRoot & "\.venv\Scripts\python.exe"
 workingLib = projRoot & "\Testing and Example Library\diagnostic_workspace"
 queuePdfs  = projRoot & "\Testing and Example Library\diagnostic_inputs"
 
@@ -38,15 +43,17 @@ queuePdfs  = projRoot & "\Testing and Example Library\diagnostic_inputs"
 ' post-bootstrap path below.
 '   Q = a literal double-quote (VBS embeds " as "" inside string literals)
 Dim Q : Q = """"
-cmd = Q & pythonw & Q & " -m iga_marketing_master_2.cli" & _
+cmd = Q & pythonExe & Q & " -m iga_marketing_master_2.cli" & _
       " --debug --client _DIAGNOSTIC" & _
       " --working-library " & Q & workingLib & Q & _
       " --queue-pdfs "      & Q & queuePdfs  & Q
 
 ' ---- Fast path ----
-If fso.FileExists(pythonw) Then
+' shell.Run cmd, 1, False -- 1 = SW_NORMAL (show console window),
+'   False = don't wait, return immediately so the launcher exits.
+If fso.FileExists(pythonExe) Then
     shell.CurrentDirectory = projRoot
-    shell.Run cmd, 0, False
+    shell.Run cmd, 1, False
     WScript.Quit 0
 End If
 
@@ -96,9 +103,9 @@ If exitCode <> 0 Then
 End If
 
 ' ---- Verify and launch in debug mode ----
-If Not fso.FileExists(pythonw) Then
-    msg = "Setup reported success, but pythonw.exe was not found at:" & vbCrLf & vbCrLf & _
-          "    " & pythonw & vbCrLf & vbCrLf & _
+If Not fso.FileExists(pythonExe) Then
+    msg = "Setup reported success, but python.exe was not found at:" & vbCrLf & vbCrLf & _
+          "    " & pythonExe & vbCrLf & vbCrLf & _
           "This is unexpected. Check the bootstrap output for clues, or" & vbCrLf & _
           "delete .venv and try the launcher again."
     MsgBox msg, vbCritical, "IGA Marketing Master 2.0 -- Setup incomplete"
@@ -106,5 +113,7 @@ If Not fso.FileExists(pythonw) Then
 End If
 
 shell.CurrentDirectory = projRoot
-shell.Run cmd, 0, False
+' 1 = SW_NORMAL (visible console window) so debug output and any
+' startup exceptions are immediately visible to the operator.
+shell.Run cmd, 1, False
 WScript.Quit 0
