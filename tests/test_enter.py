@@ -115,14 +115,19 @@ def _make_locator(input_value: str = "", checked: bool = False) -> MagicMock:
 def test_run_entry_session_enters_approved_fields(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # Note: the "approved-only" gate has been replaced with an "any with a
+    # non-empty value" gate (operator never asked for a manual review
+    # step). The test name is retained for git-blame continuity; what it
+    # actually exercises now is the happy-path entry of every enterable
+    # field. Empty-valued fields stay skipped.
     state = _StubState(
         fields={
             "account.named_insured": _StubRecord(
                 value="Bobby Luttrell & Sons LLC", status="approved"
             ),
             "submission.name": _StubRecord(value="2026 Renewal", status="approved"),
-            # Skipped: not approved.
-            "account.dba": _StubRecord(value="Bobby's", status="pending"),
+            # Empty value -> never enterable, no entry needed.
+            "account.dba": _StubRecord(value="", status="pending"),
         }
     )
     entries = {

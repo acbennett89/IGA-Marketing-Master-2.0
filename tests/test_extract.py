@@ -61,6 +61,7 @@ class FakeRunHistoryEntry:
     model_used: str | None = None
     forced_opus: bool = False
     notes: str | None = None
+    cost_usd: float | None = None
 
 
 @dataclass
@@ -93,6 +94,7 @@ class FakeState:
         self.run_history: list[FakeRunHistoryEntry] = []
         self.pending_extraction: FakePendingExtraction | None = None
         self.pending_domain_tag_proposals: list[Any] = []
+        self.total_cost_usd: float = 0.0
         self.save_call_count: int = 0
         self.merge_calls: list[
             tuple[list[FakeExtractedField], str, str]

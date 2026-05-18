@@ -461,17 +461,42 @@ def run_entry_session(
 
 
 # --------------------------------------------------------------------------- #
-# Approved-unit collection
+# Enterable-unit collection
 # --------------------------------------------------------------------------- #
 
 
+def _is_enterable(record: Any) -> bool:
+    """Decide whether a FieldRecord (or dict-shaped equivalent) is ready
+    for EPIC entry.
+
+    Matches the GUI's Begin Entry gate (see ``MainWindow._count_enterable_fields``):
+    any record with a non-empty value that hasn't already been entered.
+    Skips records whose ``status == "entered"`` to avoid double-typing on
+    resume, and records with empty/None values (nothing to type). The
+    legacy "approved" gate is gone — the operator never asked for a
+    manual review step.
+    """
+    if _record_status(record) == "entered":
+        return False
+    v = _record_value(record)
+    if v is None:
+        return False
+    if isinstance(v, str) and not v.strip():
+        return False
+    return True
+
+
 def _collect_approved_units(state: Any) -> Iterable[_Unit]:
-    """Yield singleton + repeatable approved fields in deterministic order."""
+    """Yield singleton + repeatable enterable fields in deterministic order.
+
+    Name retained for backward compatibility with callers; semantics are
+    now "enterable" (any with a value) rather than "status-approved".
+    """
 
     fields_map = getattr(state, "fields", None) or {}
     for tag in sorted(fields_map.keys()):
         record = fields_map[tag]
-        if _record_status(record) != "approved":
+        if not _is_enterable(record):
             continue
         yield _Unit(
             domain_tag=tag,
@@ -492,7 +517,7 @@ def _collect_approved_units(state: Any) -> Iterable[_Unit]:
                 continue
             for tag in tag_iter:
                 record = item[tag]
-                if _record_status(record) != "approved":
+                if not _is_enterable(record):
                     continue
                 yield _Unit(
                     domain_tag=tag,
@@ -501,6 +526,10 @@ def _collect_approved_units(state: Any) -> Iterable[_Unit]:
                     repeatable_index=idx,
                     record=record,
                 )
+
+
+# Alias the new name for callers that want clearer naming going forward.
+_collect_enterable_units = _collect_approved_units
 
 
 def _record_status(record: Any) -> str:
