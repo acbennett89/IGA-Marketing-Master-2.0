@@ -1668,11 +1668,20 @@ class MainWindow(QMainWindow):
 
         from .. import epic_session as epic_session_module
 
+        # In --debug mode, expose Chrome DevTools Protocol on
+        # config.CDP_DEBUG_PORT so Playwright MCP (or any CDP client)
+        # can attach to the running browser and we can co-iterate on
+        # automation. Production runs leave CDP closed.
+        cdp_port: int | None = None
+        if self._debug and config_module.CDP_DEBUG_PORT is not None:
+            cdp_port = int(config_module.CDP_DEBUG_PORT)
+
         try:
             self._browser_context = epic_session_module.launch_with_persistent_context(
                 self._settings.playwright_profile,
                 headed=True,
                 debug=self._debug,
+                cdp_port=cdp_port,
             )
         except Exception as exc:  # noqa: BLE001
             QMessageBox.critical(

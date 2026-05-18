@@ -310,6 +310,7 @@ def launch_with_persistent_context(
     *,
     headed: bool = True,
     debug: bool = False,
+    cdp_port: int | None = None,
 ) -> "BrowserContext":
     """Launch Chromium with a persistent profile and return the context.
 
@@ -317,6 +318,13 @@ def launch_with_persistent_context(
     ``user_data_dir`` must be absolute (Playwright #34700). When ``debug`` is
     True, tracing is started immediately so :mod:`enter` can stop+save it
     on session end.
+
+    :param cdp_port: When set, passes
+        ``--remote-debugging-port=<cdp_port>`` to Chromium so an external
+        CDP client (e.g. Playwright MCP) can attach to the running
+        browser. Chromium binds the port to localhost only — it is not
+        exposed to the network. Used in --debug runs for co-iterating
+        automation against the same browser the operator is driving.
 
     Raises:
         ValueError: ``user_data_dir`` is not absolute.
@@ -341,11 +349,16 @@ def launch_with_persistent_context(
             "`pip install playwright` then `playwright install chromium`"
         ) from exc
 
+    chromium_args: list[str] = []
+    if cdp_port is not None:
+        chromium_args.append(f"--remote-debugging-port={int(cdp_port)}")
+
     pw = sync_playwright().start()
     try:
         context = pw.chromium.launch_persistent_context(
             user_data_dir=str(user_data_dir),
             headless=not headed,
+            args=chromium_args or None,
         )
     except Exception as exc:  # noqa: BLE001 - wrap any launch failure
         # Surface Playwright's "user data dir already in use" as the typed
@@ -390,6 +403,7 @@ def launch_with_persistent_context(
             "user_data_dir": str(user_data_dir),
             "headed": headed,
             "debug": debug,
+            "cdp_port": cdp_port,
         },
     )
     return context

@@ -75,6 +75,14 @@ SUBMISSION_TYPE_OF_BUSINESS_FIXED: str = "Commercial Lines"
 # home page directly.
 EPIC_BASE_URL: str = "https://insu621.appliedepic.com/#/"
 
+# Chrome DevTools Protocol port the Chromium opens listening on when
+# the app is launched in --debug mode. Only bound to localhost (Chromium
+# default), so an external network cannot reach the running browser.
+# Lets Playwright MCP (or any CDP client) attach to the live session for
+# co-debugging selectors during automation iteration. Set to None to
+# skip the CDP exposure even in --debug mode.
+CDP_DEBUG_PORT: int | None = 9222
+
 # Subset of Settings fields that get persisted to disk via save_user_config().
 # All other Settings fields are computed at load time from platformdirs / cwd.
 _PERSISTABLE_KEYS: tuple[str, ...] = ("working_library",)
