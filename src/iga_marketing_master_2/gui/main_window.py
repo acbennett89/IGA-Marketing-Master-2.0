@@ -428,7 +428,9 @@ class _PageHeaderBar(QWidget):
 
         self.begin_btn = QPushButton("Begin Entry")
         self.begin_btn.setObjectName("HeaderBtnPrimary")
-        self.begin_btn.setToolTip("Start entering approved fields into EPIC (Ctrl+Return).")
+        self.begin_btn.setToolTip(
+            "Start entering extracted fields into EPIC (Ctrl+Return)."
+        )
         self.begin_btn.clicked.connect(self.begin_entry_clicked)
         layout.addWidget(self.begin_btn)
 
@@ -2751,16 +2753,16 @@ class MainWindow(QMainWindow):
         if self._client is None:
             self._run_controls.set_status_text("No client loaded.")
             self._run_controls.set_approved_count(0)
-            self._sync_run_actions(approved=0)
+            self._sync_run_actions(ready=0)
             return
-        approved = self._count_approved_fields(self._client.state)
+        ready = self._count_enterable_fields(self._client.state)
         self._run_controls.set_status_text(
-            f"{self._client.name} — {approved} approved field(s)."
+            f"{self._client.name} — {ready} field(s) ready."
         )
-        self._run_controls.set_approved_count(approved)
-        self._sync_run_actions(approved=approved)
+        self._run_controls.set_approved_count(ready)
+        self._sync_run_actions(ready=ready)
 
-    def _sync_run_actions(self, *, approved: int) -> None:
+    def _sync_run_actions(self, *, ready: int) -> None:
         """Mirror the bottom run-controls' enabled state onto menu/toolbar QActions.
 
         Keeps Ctrl+E / Ctrl+Enter / Esc in lockstep with the bottom buttons.
@@ -2768,7 +2770,7 @@ class MainWindow(QMainWindow):
         any_run_active = self._active_run_kind is not None
         queued = self._pending_pdfs_pane.count() if hasattr(self, "_pending_pdfs_pane") else 0
         can_extract = (queued > 0) and not any_run_active and self._client is not None
-        can_begin = (approved > 0) and not any_run_active and self._client is not None
+        can_begin = (ready > 0) and not any_run_active and self._client is not None
         can_cancel = any_run_active
 
         for key in ("header_extract", "menu_extract"):
@@ -2787,19 +2789,44 @@ class MainWindow(QMainWindow):
             resume_act.setEnabled(any_run_active)
 
     @staticmethod
-    def _count_approved_fields(state: dict) -> int:
+    def _count_enterable_fields(state: dict) -> int:
+        """Count fields that are ready to be entered into EPIC.
+
+        Previously this required ``status in {"approved", "locked"}``,
+        which gated Begin Entry behind a manual review pass the operator
+        never asked for. Now any extracted field with a non-empty value
+        that hasn't been entered yet counts — Begin Entry becomes clickable
+        as soon as extraction lands data. The ``needs_review`` flag is
+        preserved on individual records for the GUI to highlight; it no
+        longer blocks the entry gate.
+        """
         count = 0
         for record in (state.get("fields") or {}).values():
-            if isinstance(record, dict) and record.get("status") in {"approved", "locked"}:
-                count += 1
+            if not isinstance(record, dict):
+                continue
+            if record.get("status") == "entered":
+                continue
+            if record.get("value") in (None, ""):
+                continue
+            count += 1
         for items in (state.get("repeatables") or {}).values():
             for item in items or []:
                 if not isinstance(item, dict):
                     continue
                 for record in item.values():
-                    if isinstance(record, dict) and record.get("status") in {"approved", "locked"}:
-                        count += 1
+                    if not isinstance(record, dict):
+                        continue
+                    if record.get("status") == "entered":
+                        continue
+                    if record.get("value") in (None, ""):
+                        continue
+                    count += 1
         return count
+
+    # Backward-compat alias — kept so any leftover external caller keeps
+    # working. The behaviour is now "enterable" (any with a value), not
+    # "approved" (status-stamped).
+    _count_approved_fields = _count_enterable_fields
 
     def _on_begin_entry(self) -> None:
         if self._client is None:
