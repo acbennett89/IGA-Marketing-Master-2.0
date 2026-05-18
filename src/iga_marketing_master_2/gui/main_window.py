@@ -2610,8 +2610,8 @@ class MainWindow(QMainWindow):
         count = self._pending_pdfs_pane.count()
         self._run_controls.set_pending_pdf_count(count)
         # Keep the menu/toolbar Extract action gated on queue depth too.
-        approved = self._count_approved_fields(self._client.state) if self._client else 0
-        self._sync_run_actions(approved=approved)
+        ready = self._count_enterable_fields(self._client.state) if self._client else 0
+        self._sync_run_actions(ready=ready)
 
     def _on_extract_clicked(self) -> None:
         """Handler for the new Extract button. See gui-fix-2 #1."""
