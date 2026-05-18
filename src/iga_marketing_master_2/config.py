@@ -43,6 +43,32 @@ __all__ = [
 APP_NAME: str = "IGA Marketing Master"
 CONFIG_FILENAME: str = "config.json"
 
+# ---------------------------------------------------------------------------
+# Submission-setup dropdown options
+# ---------------------------------------------------------------------------
+# The Begin Entry dialog surfaces three dropdowns the operator picks from
+# before the entry walker runs: Agency, Branch, and Profit Center. The
+# values land in state.submission_setup and feed the v1-derived EPIC
+# submission-setup click sequence (cboBranch / cboProfitCenter on the
+# MKADMSTR header form). Department and Type of Business are constants
+# (per Andrew on 2026-05-18: always "CL" / "Commercial Lines").
+#
+# TODO(andrew): replace these placeholder lists with the real IGA
+# Agency / Branch / Profit Center codes. The "002" branch and "MM"
+# profit-center entries are inherited from v1's hard-coded defaults
+# and are known-good for Andrew's branch.
+SUBMISSION_AGENCY_OPTIONS: tuple[str, ...] = (
+    "(provide agency list)",
+)
+SUBMISSION_BRANCH_OPTIONS: tuple[str, ...] = (
+    "002",
+)
+SUBMISSION_PROFIT_CENTER_OPTIONS: tuple[str, ...] = (
+    "MM",
+)
+SUBMISSION_DEPARTMENT_FIXED: str = "CL"
+SUBMISSION_TYPE_OF_BUSINESS_FIXED: str = "Commercial Lines"
+
 # Subset of Settings fields that get persisted to disk via save_user_config().
 # All other Settings fields are computed at load time from platformdirs / cwd.
 _PERSISTABLE_KEYS: tuple[str, ...] = ("working_library",)

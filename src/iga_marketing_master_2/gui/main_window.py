@@ -1128,74 +1128,204 @@ def _namespace_present(state: Any, prefix: str) -> bool:
     return False
 
 
-class _CoveragePickerDialog(QDialog):
-    """Debug-mode picker: which coverages to walk during this entry run.
+class _BeginEntryDialog(QDialog):
+    """Modal that captures everything Begin Entry needs before the walker
+    runs: the operator-typed submission-setup values (Agency / Branch /
+    Profit Center / Effective Date / Expiration Date), and — in
+    ``--debug`` mode only — the per-coverage checkboxes that scope the
+    walk to a subset of LOBs.
 
-    Lists the canonical namespaces that have at least one extracted
-    field or repeatable item in state. Operator checks the ones to
-    include; the dialog returns the prefix list via
-    :meth:`selected_namespaces`. Production runs (no --debug) skip this
-    dialog and walk every enterable field.
+    Pre-populates the form from ``state.submission_setup`` if present so
+    subsequent runs just re-confirm. On accept, the host calls
+    :meth:`submission_setup` to read values back and persists them to
+    ``state.json``.
     """
 
-    def __init__(self, state: Any, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        state_obj: Any,
+        *,
+        debug: bool,
+        parent: QWidget | None = None,
+    ) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Pick coverages to enter")
+        self.setWindowTitle("Begin Entry")
         self.setModal(True)
-        self.setMinimumWidth(360)
+        self.setMinimumWidth(420)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(20, 18, 20, 16)
-        layout.setSpacing(8)
+        layout.setSpacing(10)
 
-        intro = QLabel(
-            "Select the coverages to walk for this entry run. Only "
-            "checked sections will be typed into EPIC."
+        # Local imports to keep the module's top-level import surface tight
+        # (these widgets are only needed when the dialog is opened).
+        from PySide6.QtWidgets import (
+            QCheckBox,
+            QComboBox,
+            QDialogButtonBox,
+            QFormLayout,
+            QLineEdit,
         )
-        intro.setWordWrap(True)
-        intro.setStyleSheet("color: #334155;")
-        layout.addWidget(intro)
+        from .. import config as config_module
 
-        self._checkboxes: dict[str, "QCheckBox"] = {}
-        from PySide6.QtWidgets import QCheckBox
+        prior = getattr(state_obj, "submission_setup", None)
 
-        for prefix, label in _COVERAGE_OPTIONS:
-            if not _namespace_present(state, prefix):
-                continue
-            cb = QCheckBox(label, self)
-            cb.setChecked(True)
-            cb.setStyleSheet("padding: 2px 4px;")
-            layout.addWidget(cb)
-            self._checkboxes[prefix] = cb
+        # -- Section 1: submission setup --------------------------------
+        hdr = QLabel("Submission setup")
+        hdr.setStyleSheet("font-weight: 700; font-size: 13px; color: #0f172a;")
+        layout.addWidget(hdr)
 
-        if not self._checkboxes:
-            # Edge case: state has no recognized namespaces. Show a hint
-            # and let the operator cancel.
-            note = QLabel("(No extracted coverages found in this client.)")
-            note.setStyleSheet("color: #94a3b8; font-style: italic;")
-            layout.addWidget(note)
+        form = QFormLayout()
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+        form.setHorizontalSpacing(12)
+        form.setVerticalSpacing(8)
 
-        # Select-all / clear-all helpers — handy when only a few are wanted.
-        helper_row = QHBoxLayout()
-        sel_all = QPushButton("Select all", self)
-        sel_all.clicked.connect(self._select_all)
-        clr_all = QPushButton("Clear all", self)
-        clr_all.clicked.connect(self._clear_all)
-        helper_row.addWidget(sel_all)
-        helper_row.addWidget(clr_all)
-        helper_row.addStretch(1)
-        layout.addLayout(helper_row)
+        self._agency_cb = QComboBox(self)
+        self._agency_cb.addItems(list(config_module.SUBMISSION_AGENCY_OPTIONS))
+        self._branch_cb = QComboBox(self)
+        self._branch_cb.addItems(list(config_module.SUBMISSION_BRANCH_OPTIONS))
+        self._profit_center_cb = QComboBox(self)
+        self._profit_center_cb.addItems(
+            list(config_module.SUBMISSION_PROFIT_CENTER_OPTIONS)
+        )
 
-        # OK / Cancel.
-        from PySide6.QtWidgets import QDialogButtonBox
+        def _restore_combo(cb: QComboBox, prior_value: str | None) -> None:
+            if not prior_value:
+                return
+            idx = cb.findText(prior_value)
+            if idx >= 0:
+                cb.setCurrentIndex(idx)
+            else:
+                # Persisted value isn't in the current option list (someone
+                # edited config.py) — surface it as an editable extra so the
+                # operator sees it and can adjust.
+                cb.setEditable(True)
+                cb.setCurrentText(prior_value)
+                cb.setEditable(False)
 
-        buttons = QDialogButtonBox(
+        prior_agency = getattr(prior, "agency", None) if prior else None
+        prior_branch = getattr(prior, "branch", None) if prior else None
+        prior_pc = getattr(prior, "profit_center", None) if prior else None
+        _restore_combo(self._agency_cb, prior_agency)
+        _restore_combo(self._branch_cb, prior_branch)
+        _restore_combo(self._profit_center_cb, prior_pc)
+
+        self._eff_date_inp = QLineEdit(self)
+        self._eff_date_inp.setPlaceholderText("MM/DD/YYYY")
+        if prior and prior.effective_date:
+            self._eff_date_inp.setText(prior.effective_date)
+
+        self._exp_date_inp = QLineEdit(self)
+        self._exp_date_inp.setPlaceholderText("MM/DD/YYYY")
+        if prior and prior.expiration_date:
+            self._exp_date_inp.setText(prior.expiration_date)
+
+        form.addRow("Agency:", self._agency_cb)
+        form.addRow("Branch:", self._branch_cb)
+        form.addRow("Profit Center:", self._profit_center_cb)
+        form.addRow("Effective Date:", self._eff_date_inp)
+        form.addRow("Expiration Date:", self._exp_date_inp)
+
+        layout.addLayout(form)
+
+        # Fixed-value footnote (operator can see what's hard-coded).
+        fixed_lbl = QLabel(
+            f"Department is always “{config_module.SUBMISSION_DEPARTMENT_FIXED}”; "
+            f"Type of Business is always “{config_module.SUBMISSION_TYPE_OF_BUSINESS_FIXED}”."
+        )
+        fixed_lbl.setStyleSheet("color: #64748b; font-size: 11px;")
+        fixed_lbl.setWordWrap(True)
+        layout.addWidget(fixed_lbl)
+
+        # -- Section 2: coverage picker (--debug only) -------------------
+        self._checkboxes: dict[str, QCheckBox] = {}
+        if debug:
+            sep = QFrame()
+            sep.setFrameShape(QFrame.Shape.HLine)
+            sep.setStyleSheet("color: #e2e8f0;")
+            layout.addWidget(sep)
+
+            hdr2 = QLabel("Coverages to enter (debug)")
+            hdr2.setStyleSheet("font-weight: 700; font-size: 13px; color: #0f172a;")
+            layout.addWidget(hdr2)
+
+            intro = QLabel(
+                "Only checked sections will be typed into EPIC during "
+                "this run."
+            )
+            intro.setWordWrap(True)
+            intro.setStyleSheet("color: #334155;")
+            layout.addWidget(intro)
+
+            for prefix, label in _COVERAGE_OPTIONS:
+                if not _namespace_present(state_obj, prefix):
+                    continue
+                cb = QCheckBox(label, self)
+                cb.setChecked(True)
+                cb.setStyleSheet("padding: 2px 4px;")
+                layout.addWidget(cb)
+                self._checkboxes[prefix] = cb
+
+            if not self._checkboxes:
+                note = QLabel("(No extracted coverages found in this client.)")
+                note.setStyleSheet("color: #94a3b8; font-style: italic;")
+                layout.addWidget(note)
+
+            helper_row = QHBoxLayout()
+            sel_all = QPushButton("Select all", self)
+            sel_all.clicked.connect(self._select_all)
+            clr_all = QPushButton("Clear all", self)
+            clr_all.clicked.connect(self._clear_all)
+            helper_row.addWidget(sel_all)
+            helper_row.addWidget(clr_all)
+            helper_row.addStretch(1)
+            layout.addLayout(helper_row)
+
+        # -- OK / Cancel ------------------------------------------------
+        self._buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel,
             self,
         )
-        buttons.button(QDialogButtonBox.StandardButton.Ok).setText("Enter selected")
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
-        layout.addWidget(buttons)
+        self._buttons.button(QDialogButtonBox.StandardButton.Ok).setText(
+            "Setup & Begin Entry"
+        )
+        self._buttons.accepted.connect(self._on_accept)
+        self._buttons.rejected.connect(self.reject)
+        layout.addWidget(self._buttons)
+
+    # -- Internal ----------------------------------------------------------
+
+    def _on_accept(self) -> None:
+        """Validate the form, refusing to close if anything is empty."""
+        from .. import state as state_module
+
+        missing: list[str] = []
+        if not self._agency_cb.currentText().strip():
+            missing.append("Agency")
+        if not self._branch_cb.currentText().strip():
+            missing.append("Branch")
+        if not self._profit_center_cb.currentText().strip():
+            missing.append("Profit Center")
+        if not self._eff_date_inp.text().strip():
+            missing.append("Effective Date")
+        if not self._exp_date_inp.text().strip():
+            missing.append("Expiration Date")
+        if missing:
+            QMessageBox.warning(
+                self,
+                "Missing fields",
+                "Please fill in: " + ", ".join(missing),
+            )
+            return
+        # Defer the SubmissionSetup construction to accept-time so we know
+        # everything is filled before the host reads it back.
+        self._setup = state_module.SubmissionSetup(
+            agency=self._agency_cb.currentText().strip(),
+            branch=self._branch_cb.currentText().strip(),
+            profit_center=self._profit_center_cb.currentText().strip(),
+            effective_date=self._eff_date_inp.text().strip(),
+            expiration_date=self._exp_date_inp.text().strip(),
+        )
+        self.accept()
 
     def _select_all(self) -> None:
         for cb in self._checkboxes.values():
@@ -1205,9 +1335,29 @@ class _CoveragePickerDialog(QDialog):
         for cb in self._checkboxes.values():
             cb.setChecked(False)
 
-    def selected_namespaces(self) -> list[str]:
-        """Return the prefix list the walker should restrict itself to."""
+    # -- Public read-back --------------------------------------------------
+
+    def submission_setup(self) -> Any:
+        """Return the SubmissionSetup the operator just confirmed.
+
+        Only valid after the dialog was accepted; raises AttributeError
+        if called after a Cancel.
+        """
+        return self._setup
+
+    def selected_namespaces(self) -> list[str] | None:
+        """Selected coverage prefixes (debug mode only).
+
+        Returns ``None`` if the dialog ran in production mode (no coverage
+        picker was shown) so the host walks every enterable field.
+        """
+        if not self._checkboxes:
+            return None
         return [prefix for prefix, cb in self._checkboxes.items() if cb.isChecked()]
+
+
+# Backward-compat alias so any import of the old class name still works.
+_CoveragePickerDialog = _BeginEntryDialog
 
 
 # ---------------------------------------------------------------------------
@@ -3035,23 +3185,36 @@ class MainWindow(QMainWindow):
             )
             return
 
-        # Debug-mode coverage picker — operator selects which LOBs to
-        # walk for this run so iteration on coverage-specific entry
-        # logic stays tight. Production runs (--debug off) skip the
-        # picker and walk every enterable field.
-        include_namespaces: list[str] | None = None
-        if self._debug:
-            dlg = _CoveragePickerDialog(entry_state, self)
-            if dlg.exec() != QDialog.DialogCode.Accepted:
-                return  # operator cancelled
-            include_namespaces = dlg.selected_namespaces()
-            if not include_namespaces:
-                QMessageBox.information(
-                    self,
-                    "No coverages selected",
-                    "Pick at least one coverage to enter.",
-                )
-                return
+        # Begin Entry dialog: captures operator-typed submission-setup
+        # values (Agency / Branch / Profit Center / Eff Date / Exp Date)
+        # always, plus per-coverage scope checkboxes in --debug mode.
+        # Pre-populates from the persisted state.submission_setup so
+        # subsequent runs just re-confirm.
+        dlg = _BeginEntryDialog(entry_state, debug=self._debug, parent=self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return  # operator cancelled
+        submission_setup = dlg.submission_setup()
+        include_namespaces = dlg.selected_namespaces()
+        if self._debug and (include_namespaces is None or not include_namespaces):
+            QMessageBox.information(
+                self,
+                "No coverages selected",
+                "Pick at least one coverage to enter.",
+            )
+            return
+
+        # Persist the just-confirmed submission setup so the next Begin
+        # Entry click pre-populates from these values.
+        entry_state.submission_setup = submission_setup
+        try:
+            state_module.save_atomic(entry_state, self._client.path)
+        except Exception as exc:  # noqa: BLE001
+            _logger.warning(
+                "could not persist submission_setup before entry: %s", exc
+            )
+        # Mirror the change into the GUI's in-memory dict view too, so
+        # the status bar / panes don't read a stale snapshot.
+        self._client.state = _safe_state_load(self._client.path)
 
         browser_context = self._browser_context
         client_path = self._client.path

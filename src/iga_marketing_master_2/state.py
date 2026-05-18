@@ -256,6 +256,30 @@ class PendingExtraction:
 
 
 @dataclass(slots=True, kw_only=True)
+class SubmissionSetup:
+    """Operator-provided values used to create the EPIC submission.
+
+    Captured via the Begin Entry dialog (see ``_BeginEntryDialog``) and
+    persisted per-client so subsequent runs default to the same picks.
+    Department and Type of Business are application-wide constants
+    (``config.SUBMISSION_DEPARTMENT_FIXED`` / ``SUBMISSION_TYPE_OF_BUSINESS_FIXED``)
+    so they are not stored here.
+
+    Effective and expiration dates are **operator-typed**, not extracted —
+    Claude doesn't see the EPIC submission's policy period, so the
+    operator types it each time. Format is whatever the operator entered
+    (typically MM/DD/YYYY); ``epic_submission_setup`` normalizes before
+    sending to EPIC.
+    """
+
+    agency: str | None = None
+    branch: str | None = None
+    profit_center: str | None = None
+    effective_date: str | None = None
+    expiration_date: str | None = None
+
+
+@dataclass(slots=True, kw_only=True)
 class RunHistoryEntry:
     """One top-level run-history entry per extraction or entry run."""
 
@@ -293,6 +317,10 @@ class State:
     # client, in USD. Additive: each completed run adds its own cost (also
     # stored on the RunHistoryEntry). Never decreases — re-runs append.
     total_cost_usd: float = 0.0
+    # Operator-typed values that drive the EPIC submission setup at Begin
+    # Entry time. Persisted so subsequent Begin Entry clicks default to
+    # the same picks (operator typically just re-confirms).
+    submission_setup: SubmissionSetup | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -774,6 +802,11 @@ def _state_to_dict(state: State) -> dict[str, Any]:
         "pending_domain_tag_proposals": [
             dict(p) for p in state.pending_domain_tag_proposals
         ],
+        "submission_setup": (
+            _dc_to_dict(state.submission_setup)
+            if state.submission_setup is not None
+            else None
+        ),
     }
 
 
@@ -852,6 +885,20 @@ def _pending_extraction_from_dict(
     )
 
 
+def _submission_setup_from_dict(
+    d: dict[str, Any] | None,
+) -> SubmissionSetup | None:
+    if d is None:
+        return None
+    return SubmissionSetup(
+        agency=d.get("agency"),
+        branch=d.get("branch"),
+        profit_center=d.get("profit_center"),
+        effective_date=d.get("effective_date"),
+        expiration_date=d.get("expiration_date"),
+    )
+
+
 def _run_history_from_dict(d: dict[str, Any]) -> RunHistoryEntry:
     raw_cost = d.get("cost_usd")
     cost_usd: float | None = None
@@ -925,6 +972,7 @@ def _state_from_dict(raw: dict[str, Any], *, client_fallback: str) -> State:
         pending_domain_tag_proposals=[
             dict(p) for p in raw.get("pending_domain_tag_proposals", [])
         ],
+        submission_setup=_submission_setup_from_dict(raw.get("submission_setup")),
     )
 
 
