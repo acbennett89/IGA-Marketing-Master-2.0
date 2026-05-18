@@ -1683,6 +1683,23 @@ class MainWindow(QMainWindow):
             )
             return
 
+        # Navigate the first page straight to the EPIC tenant. The
+        # persistent profile retains SSO cookies, so after the first
+        # successful sign-in subsequent launches land on the EPIC home
+        # page directly. A navigation failure (e.g. no network, EPIC
+        # down) is logged but doesn't tear the context down — the
+        # operator can navigate manually from a blank tab.
+        try:
+            pages = self._browser_context.pages
+            page = pages[0] if pages else self._browser_context.new_page()
+            page.goto(
+                config_module.EPIC_BASE_URL,
+                wait_until="domcontentloaded",
+                timeout=30_000,
+            )
+        except Exception as exc:  # noqa: BLE001
+            _logger.warning("epic_url_navigate_failed: %s", exc)
+
         self._logger.info(
             "browser.launched user_data_dir=%s",
             self._settings.playwright_profile,

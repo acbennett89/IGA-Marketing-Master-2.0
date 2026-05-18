@@ -69,6 +69,12 @@ SUBMISSION_PROFIT_CENTER_OPTIONS: tuple[str, ...] = (
 SUBMISSION_DEPARTMENT_FIXED: str = "CL"
 SUBMISSION_TYPE_OF_BUSINESS_FIXED: str = "Commercial Lines"
 
+# Applied EPIC tenant URL — the page Launch Browser navigates to on
+# every open. The persistent profile remembers SSO cookies across
+# launches, so after the first sign-in the operator lands on the EPIC
+# home page directly.
+EPIC_BASE_URL: str = "https://insu621.appliedepic.com/#/"
+
 # Subset of Settings fields that get persisted to disk via save_user_config().
 # All other Settings fields are computed at load time from platformdirs / cwd.
 _PERSISTABLE_KEYS: tuple[str, ...] = ("working_library",)
