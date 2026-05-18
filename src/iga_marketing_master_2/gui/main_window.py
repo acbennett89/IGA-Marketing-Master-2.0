@@ -1081,6 +1081,136 @@ class _ExtractionBusyDialog(QDialog):
 
 
 # ---------------------------------------------------------------------------
+# Coverage picker (--debug mode only)
+# ---------------------------------------------------------------------------
+
+
+# Human-readable label per canonical namespace prefix. Order is the
+# display order in the picker, top-to-bottom.
+_COVERAGE_OPTIONS: tuple[tuple[str, str], ...] = (
+    ("account",                  "Account / Named Insureds"),
+    ("submission",               "Submission"),
+    ("producer",                 "Producer"),
+    ("location",                 "Locations"),
+    ("policy.gl",                "General Liability"),
+    ("policy.property",          "Property"),
+    ("policy.auto",              "Business Auto"),
+    ("policy.inland_marine",     "Inland Marine"),
+    ("policy.workers_comp",      "Workers Comp"),
+    ("policy.umbrella",          "Umbrella / Excess"),
+    ("policy.crime",             "Crime"),
+    ("policy.cyber",             "Cyber"),
+    ("policy.professional",      "Professional"),
+    ("policy.directors_officers", "D&O"),
+    ("policy.employment_practices", "EPL"),
+    ("policy.pollution",         "Pollution"),
+    ("vehicle",                  "Vehicles (legacy)"),
+    ("driver",                   "Drivers (legacy)"),
+    ("prior_carrier",            "Prior Carriers"),
+    ("loss",                     "Loss History"),
+    ("notes",                    "Notes"),
+)
+
+
+def _namespace_present(state: Any, prefix: str) -> bool:
+    """Return True if state has any field or repeatable-row that starts
+    with ``prefix + "."`` (or equals ``prefix`` exactly for short names)."""
+    fields_map = getattr(state, "fields", None) or {}
+    for tag in fields_map.keys():
+        if tag == prefix or tag.startswith(prefix + "."):
+            return True
+    repeatables = getattr(state, "repeatables", None) or {}
+    for group, items in repeatables.items():
+        if not items:
+            continue
+        if group == prefix or group.startswith(prefix + "."):
+            return True
+    return False
+
+
+class _CoveragePickerDialog(QDialog):
+    """Debug-mode picker: which coverages to walk during this entry run.
+
+    Lists the canonical namespaces that have at least one extracted
+    field or repeatable item in state. Operator checks the ones to
+    include; the dialog returns the prefix list via
+    :meth:`selected_namespaces`. Production runs (no --debug) skip this
+    dialog and walk every enterable field.
+    """
+
+    def __init__(self, state: Any, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Pick coverages to enter")
+        self.setModal(True)
+        self.setMinimumWidth(360)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 18, 20, 16)
+        layout.setSpacing(8)
+
+        intro = QLabel(
+            "Select the coverages to walk for this entry run. Only "
+            "checked sections will be typed into EPIC."
+        )
+        intro.setWordWrap(True)
+        intro.setStyleSheet("color: #334155;")
+        layout.addWidget(intro)
+
+        self._checkboxes: dict[str, "QCheckBox"] = {}
+        from PySide6.QtWidgets import QCheckBox
+
+        for prefix, label in _COVERAGE_OPTIONS:
+            if not _namespace_present(state, prefix):
+                continue
+            cb = QCheckBox(label, self)
+            cb.setChecked(True)
+            cb.setStyleSheet("padding: 2px 4px;")
+            layout.addWidget(cb)
+            self._checkboxes[prefix] = cb
+
+        if not self._checkboxes:
+            # Edge case: state has no recognized namespaces. Show a hint
+            # and let the operator cancel.
+            note = QLabel("(No extracted coverages found in this client.)")
+            note.setStyleSheet("color: #94a3b8; font-style: italic;")
+            layout.addWidget(note)
+
+        # Select-all / clear-all helpers — handy when only a few are wanted.
+        helper_row = QHBoxLayout()
+        sel_all = QPushButton("Select all", self)
+        sel_all.clicked.connect(self._select_all)
+        clr_all = QPushButton("Clear all", self)
+        clr_all.clicked.connect(self._clear_all)
+        helper_row.addWidget(sel_all)
+        helper_row.addWidget(clr_all)
+        helper_row.addStretch(1)
+        layout.addLayout(helper_row)
+
+        # OK / Cancel.
+        from PySide6.QtWidgets import QDialogButtonBox
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel,
+            self,
+        )
+        buttons.button(QDialogButtonBox.StandardButton.Ok).setText("Enter selected")
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _select_all(self) -> None:
+        for cb in self._checkboxes.values():
+            cb.setChecked(True)
+
+    def _clear_all(self) -> None:
+        for cb in self._checkboxes.values():
+            cb.setChecked(False)
+
+    def selected_namespaces(self) -> list[str]:
+        """Return the prefix list the walker should restrict itself to."""
+        return [prefix for prefix, cb in self._checkboxes.items() if cb.isChecked()]
+
+
+# ---------------------------------------------------------------------------
 # MainWindow
 # ---------------------------------------------------------------------------
 
@@ -1122,6 +1252,12 @@ class MainWindow(QMainWindow):
         # None when idle; populated by _show_busy_dialog and torn down by
         # _close_busy_dialog in the worker's finished/failed slots.
         self._busy_dialog: _ExtractionBusyDialog | None = None
+        # Persistent Playwright BrowserContext, owned by MainWindow.
+        # _on_launch_browser_clicked launches it; _on_begin_entry reuses it.
+        # Kept alive across multiple Begin Entry runs so the operator's
+        # EPIC login + navigation survives between sessions. Torn down in
+        # closeEvent when the IGA app itself shuts down.
+        self._browser_context: object | None = None  # BrowserContext | None at runtime
         # Tracks which kind of run is in flight so the progress strip and
         # run-controls can clear themselves correctly on finish/fail.
         self._active_run_kind: str | None = None  # "extract" | "entry" | None
@@ -1351,61 +1487,59 @@ class MainWindow(QMainWindow):
             self._pages.setCurrentIndex(idx)
 
     def _on_launch_browser_clicked(self) -> None:
-        """Spawn Chrome with remote-debugging enabled.
+        """Launch the Playwright persistent-context Chromium that the
+        entry walker will drive.
 
-        The EPIC entry script connects to this Chrome instance via Playwright
-        over CDP, so the operator's existing session (cookies, MFA state) is
-        reused. Port and user-data-dir defaults match v1 conventions.
+        The operator workflow:
+          1. Click Launch Browser → a Chromium window opens using the
+             persistent profile at ``settings.playwright_profile``. The
+             profile retains cookies / MFA state across launches, so
+             after the first EPIC login the session is sticky.
+          2. Inside that Chromium, the operator navigates to EPIC, the
+             client, and the Marketed Policies screen.
+          3. The operator clicks Begin Entry. ``_on_begin_entry`` uses
+             this same BrowserContext (no second browser opens).
+
+        The context lives on ``self._browser_context`` for the lifetime
+        of the IGA app and is torn down in ``closeEvent``.
         """
-        import subprocess
+        if self._browser_context is not None:
+            # Already running — bring the existing window to the front
+            # so the operator sees it instead of a confusing no-op click.
+            try:
+                pages = self._browser_context.pages
+                if pages:
+                    pages[0].bring_to_front()
+            except Exception:  # noqa: BLE001
+                pass
+            if self._sidebar is not None:
+                self._sidebar.set_engine_status(False, "Browser already running")
+            return
 
-        port = "9222"
-        userdata = r"C:\Temp\chrome-debug"
-        chrome_candidates = [
-            r"C:\Program Files\Google\Chrome\Application\chrome.exe",
-            r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
-        ]
-        chrome_exe = next((p for p in chrome_candidates if Path(p).exists()), None)
-        if chrome_exe is None:
+        from .. import epic_session as epic_session_module
+
+        try:
+            self._browser_context = epic_session_module.launch_with_persistent_context(
+                self._settings.playwright_profile,
+                headed=True,
+                debug=self._debug,
+            )
+        except Exception as exc:  # noqa: BLE001
             QMessageBox.critical(
                 self,
-                "Chrome Not Found",
-                "Could not locate chrome.exe. Install Chrome or update the "
-                "path in main_window._on_launch_browser_clicked.",
+                "Couldn't launch browser",
+                "Chromium failed to launch with the persistent profile.\n\n"
+                f"{exc}",
             )
-            return
-
-        # Make sure the user-data-dir exists so Chrome doesn't fail silently
-        # on first launch.
-        try:
-            Path(userdata).mkdir(parents=True, exist_ok=True)
-        except OSError as exc:
-            QMessageBox.warning(
-                self,
-                "User Data Dir",
-                f"Could not create {userdata}: {exc}",
-            )
-            return
-
-        cmd = [
-            chrome_exe,
-            f"--remote-debugging-port={port}",
-            f"--user-data-dir={userdata}",
-        ]
-        try:
-            subprocess.Popen(cmd)
-        except OSError as exc:
-            QMessageBox.critical(self, "Launch Failed", str(exc))
             return
 
         self._logger.info(
-            "browser.launched port=%s user_data_dir=%s exe=%s",
-            port, userdata, chrome_exe,
+            "browser.launched user_data_dir=%s",
+            self._settings.playwright_profile,
         )
         if self._sidebar is not None:
-            self._sidebar.set_engine_status(
-                False, f"Browser launched (port {port})"
-            )
+            self._sidebar.set_engine_status(False, "Browser running")
+        self._update_status_bar_idle()
 
     @staticmethod
     def _build_history_page() -> QWidget:
@@ -1791,6 +1925,22 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event) -> None:  # noqa: N802 (Qt-style)
         self._persist_layout()
+        # Tear down the Playwright BrowserContext so its profile lock is
+        # released. The persistent profile dir is intentionally NOT wiped
+        # — it carries the operator's EPIC login cookies between sessions.
+        ctx = self._browser_context
+        self._browser_context = None
+        if ctx is not None:
+            try:
+                ctx.close()
+            except Exception:  # noqa: BLE001
+                pass
+            pw = getattr(ctx, "_iga_playwright", None)
+            if pw is not None:
+                try:
+                    pw.stop()
+                except Exception:  # noqa: BLE001
+                    pass
         super().closeEvent(event)
 
     # -- First-run / API key flow -------------------------------------------
@@ -2849,17 +2999,19 @@ class MainWindow(QMainWindow):
             )
             return
 
-        # enter.run_entry_session signature:
-        #   run_entry_session(state, field_map, browser_context, *,
-        #                     on_pause_callback, on_progress_callback=None,
-        #                     settings=None, client_path=None, ...)
-        # The GUI keeps a plain-dict view of state for the panes; for the
-        # entry walk we re-load the canonical State dataclass off disk and
-        # construct a fresh FieldMap + Playwright context. Doing this on
-        # the GUI thread before spawning the worker means any setup error
-        # (Playwright not installed, profile in use, missing field map)
-        # surfaces as a modal instead of a worker-thread exception.
-        from .. import epic_session as epic_session_module
+        # Browser must be launched first — operator opens it via the
+        # sidebar's Launch Browser button, then navigates to EPIC / the
+        # client / the Marketed Policies screen before clicking Begin Entry.
+        if self._browser_context is None:
+            QMessageBox.information(
+                self,
+                "Launch browser first",
+                "Click 'Launch Browser' in the sidebar, navigate to EPIC, "
+                "open the client, and go to the Marketed Policies screen "
+                "before starting entry.",
+            )
+            return
+
         from .. import field_map as field_map_module
         from .. import state as state_module
 
@@ -2883,20 +3035,25 @@ class MainWindow(QMainWindow):
             )
             return
 
-        try:
-            browser_context = epic_session_module.launch_with_persistent_context(
-                self._settings.playwright_profile,
-                headed=True,
-                debug=self._debug,
-            )
-        except Exception as exc:  # noqa: BLE001
-            QMessageBox.warning(
-                self,
-                "Couldn't launch EPIC browser",
-                f"Chromium failed to launch with the persistent profile.\n\n{exc}",
-            )
-            return
+        # Debug-mode coverage picker — operator selects which LOBs to
+        # walk for this run so iteration on coverage-specific entry
+        # logic stays tight. Production runs (--debug off) skip the
+        # picker and walk every enterable field.
+        include_namespaces: list[str] | None = None
+        if self._debug:
+            dlg = _CoveragePickerDialog(entry_state, self)
+            if dlg.exec() != QDialog.DialogCode.Accepted:
+                return  # operator cancelled
+            include_namespaces = dlg.selected_namespaces()
+            if not include_namespaces:
+                QMessageBox.information(
+                    self,
+                    "No coverages selected",
+                    "Pick at least one coverage to enter.",
+                )
+                return
 
+        browser_context = self._browser_context
         client_path = self._client.path
         settings = self._settings
 
@@ -2912,29 +3069,19 @@ class MainWindow(QMainWindow):
                     total,
                 )
 
-            try:
-                return run_entry_session(
-                    entry_state,
-                    entry_field_map,
-                    browser_context,
-                    on_pause_callback=self._on_pause_callback,
-                    on_progress_callback=progress,
-                    settings=settings,
-                    client_path=client_path,
-                )
-            finally:
-                # Always tear down the browser context so the persistent
-                # profile lock is released even on exceptions.
-                try:
-                    browser_context.close()
-                except Exception:  # noqa: BLE001
-                    pass
-                pw = getattr(browser_context, "_iga_playwright", None)
-                if pw is not None:
-                    try:
-                        pw.stop()
-                    except Exception:  # noqa: BLE001
-                        pass
+            # The shared browser_context stays alive across entry runs —
+            # we deliberately do NOT close it in a finally block here.
+            # MainWindow owns its lifecycle and tears it down in closeEvent.
+            return run_entry_session(
+                entry_state,
+                entry_field_map,
+                browser_context,
+                on_pause_callback=self._on_pause_callback,
+                on_progress_callback=progress,
+                settings=settings,
+                client_path=client_path,
+                include_namespaces=include_namespaces,
+            )
 
         self._active_run_kind = "entry"
         self._run_controls.set_entering(True)

@@ -166,6 +166,7 @@ def run_entry_session(
     client_path: Path | None = None,
     save_state_callback: Callable[[Any], None] | None = None,
     screen_container: "Locator | None" = None,
+    include_namespaces: list[str] | None = None,
 ) -> EntryResult:
     """Walk approved fields and enter them into EPIC.
 
@@ -214,7 +215,7 @@ def run_entry_session(
         },
     )
 
-    units = list(_collect_approved_units(state))
+    units = list(_collect_approved_units(state, include_namespaces=include_namespaces))
     total = len(units)
 
     if total == 0:
@@ -486,15 +487,43 @@ def _is_enterable(record: Any) -> bool:
     return True
 
 
-def _collect_approved_units(state: Any) -> Iterable[_Unit]:
+def _matches_namespace(tag: str, namespaces: list[str] | None) -> bool:
+    """True when ``tag`` lives under any of the allowed namespaces.
+
+    ``namespaces=None`` means "no filter — every tag passes". A tag
+    matches a namespace prefix when the tag equals it OR starts with
+    ``prefix + "."``. So ``"policy.gl"`` allows ``policy.gl.hazard.*``
+    and ``policy.gl.aggregate_limit`` but NOT ``policy.glOTHER.x``.
+    """
+    if not namespaces:
+        return True
+    for prefix in namespaces:
+        if tag == prefix or tag.startswith(prefix + "."):
+            return True
+    return False
+
+
+def _collect_approved_units(
+    state: Any,
+    *,
+    include_namespaces: list[str] | None = None,
+) -> Iterable[_Unit]:
     """Yield singleton + repeatable enterable fields in deterministic order.
 
     Name retained for backward compatibility with callers; semantics are
     now "enterable" (any with a value) rather than "status-approved".
+
+    :param include_namespaces: Optional list of canonical-prefix filters
+        (e.g. ``["policy.gl", "policy.property"]``). When provided, only
+        tags / repeatable-groups whose dotted path starts with one of
+        the prefixes are yielded. Used by the debug-mode coverage picker
+        so iteration on a single LOB stays tight.
     """
 
     fields_map = getattr(state, "fields", None) or {}
     for tag in sorted(fields_map.keys()):
+        if not _matches_namespace(tag, include_namespaces):
+            continue
         record = fields_map[tag]
         if not _is_enterable(record):
             continue
@@ -508,6 +537,8 @@ def _collect_approved_units(state: Any) -> Iterable[_Unit]:
 
     repeatables = getattr(state, "repeatables", None) or {}
     for group in sorted(repeatables.keys()):
+        if not _matches_namespace(group, include_namespaces):
+            continue
         items = repeatables[group] or []
         for idx, item in enumerate(items):
             # An item is dict-like: domain_tag -> FieldRecord
