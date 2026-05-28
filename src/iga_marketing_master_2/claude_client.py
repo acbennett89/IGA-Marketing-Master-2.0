@@ -34,6 +34,7 @@ import hashlib
 import io
 import json
 import logging
+import os
 import re
 import time
 from collections.abc import Iterable, Mapping, Sequence
@@ -68,6 +69,7 @@ __all__ = [
     "FieldMap",
     "extract_from_pdf",
     "reextract_low_confidence_fields",
+    "abbreviate_for_epic",
 ]
 
 # ----- Module-level constants (per ARCHITECTURE.md Appendix A) ----------------
@@ -1532,6 +1534,38 @@ def extract_from_pdf(
     if not pdf_path.is_absolute():
         pdf_path = pdf_path.resolve()
 
+    # Simulation hook for headless / offline testing. When IGA_SIM_EXTRACTION_DIR
+    # is set, look for a fixture JSON whose stem matches the PDF stem
+    # ("foo.pdf" → "foo.json"). Return the recorded ExtractedField list and
+    # skip the real Anthropic API call entirely — zero tokens consumed.
+    # Fixture schema: {"records": [<ExtractedField as dict>, ...]}.
+    sim_dir = os.environ.get("IGA_SIM_EXTRACTION_DIR")
+    if sim_dir:
+        sim_path = Path(sim_dir) / f"{pdf_path.stem}.json"
+        if sim_path.is_file():
+            logger.info("extract_from_pdf: SIM mode, loading %s", sim_path)
+            with sim_path.open("r", encoding="utf-8") as fh:
+                payload = json.load(fh)
+            sim_records: list[ExtractedField] = []
+            for rec in payload.get("records", []):
+                sim_records.append(ExtractedField(
+                    domain_tag=rec["domain_tag"],
+                    value=rec.get("value"),
+                    source_doc=rec.get("source_doc", pdf_path.name),
+                    source_page=int(rec.get("source_page", 1)),
+                    source_quote=rec.get("source_quote", ""),
+                    confidence=float(rec.get("confidence", 0.9)),
+                    needs_review=bool(rec.get("needs_review", False)),
+                    repeatable_group=rec.get("repeatable_group"),
+                    repeatable_index=rec.get("repeatable_index"),
+                    model_used=rec.get("model_used", DEFAULT_SONNET_MODEL),
+                ))
+            return sim_records
+        logger.warning(
+            "extract_from_pdf: SIM mode but no fixture at %s — falling back to real API",
+            sim_path,
+        )
+
     client = _resolve_client(api_key)
     chunks = _read_pdf_chunks(pdf_path, debug_dir=debug_dir, run_id=run_id)
 
@@ -1825,3 +1859,114 @@ def _attach_usage(
     out = _RecordsList(records)
     out.cache_usage = usage
     return out
+
+
+# ── EPIC-side short-form text abbreviation ───────────────────────────────────
+#
+# The canonical cache for abbreviation results is the per-client
+# state.json (sibling ``*_short`` fields like
+# ``policy.inland_marine.unscheduled_item.description_short``). The GUI
+# populates those lazily on refresh and persists via ``field_changed``;
+# the EPIC entry step reads them directly. The in-process dict below is
+# only a within-run optimization for the rare case where the same long
+# string is abbreviated twice in a single Python process (e.g., the
+# entry-time fallback when state.json has no cached short form).
+
+_ABBREV_CACHE: dict[tuple[str, int], str] = {}
+
+_ABBREV_SYSTEM = (
+    "You shorten insurance coverage descriptions so they fit a strict "
+    "character limit on a data-entry form. Use standard insurance "
+    "abbreviations where they exist: BPP=Business Personal Property, "
+    "RC=Replacement Cost, ACV=Actual Cash Value, BI=Bodily Injury, "
+    "PD=Property Damage, EE=Employees, Equip=Equipment, Bldg=Building, "
+    "Prop=Property, Comm=Commercial, Comp=Comprehensive, "
+    "Liab=Liability, Recovery=Rcv, Reimbursement=Reimb, "
+    "Endorsement=Endt. Keep the core meaning. Reply with ONLY the "
+    "abbreviated text — no quotes, no explanation, no trailing period."
+)
+
+
+def _truncate_fallback(text: str, max_chars: int) -> str:
+    """Word-boundary truncation with ellipsis. Used when the API is unavailable."""
+    if len(text) <= max_chars:
+        return text
+    if max_chars <= 1:
+        return text[:max_chars]
+    cutoff = max_chars - 1  # leave room for the ellipsis
+    chopped = text[:cutoff]
+    # Back up to the last word boundary if there is one nearby.
+    space = chopped.rfind(" ")
+    if space >= cutoff - 12:  # only if it lands within the last ~12 chars
+        chopped = chopped[:space]
+    return (chopped.rstrip(" -,;:") + "…")[:max_chars]
+
+
+def abbreviate_for_epic(
+    text: str,
+    *,
+    max_chars: int = 30,
+    api_key: str | None = None,
+    model: str = DEFAULT_SONNET_MODEL,
+) -> str:
+    """Shorten *text* so it fits within *max_chars* characters.
+
+    Returns *text* unchanged when it already fits. Otherwise calls Claude
+    to produce a domain-aware abbreviation using standard insurance
+    short-forms (BPP, RC, ACV, ...). Results are cached per-process keyed
+    by ``(text, max_chars)`` so repeated calls within a single run incur
+    only one API hit per unique input.
+
+    If the API is unavailable (no key, network error, model returns an
+    over-length reply), falls back to word-boundary truncation with an
+    ellipsis so the caller always gets *something* short enough to enter.
+    """
+    if not text or len(text) <= max_chars:
+        return text or ""
+
+    cache_key = (text, max_chars)
+    if cache_key in _ABBREV_CACHE:
+        return _ABBREV_CACHE[cache_key]
+
+    log = logging.getLogger("iga.claude_client.abbrev")
+
+    try:
+        client = _resolve_client(api_key)
+    except ClaudeError as exc:
+        log.warning("No Claude client for abbreviation (%s) — truncating", exc)
+        result = _truncate_fallback(text, max_chars)
+        _ABBREV_CACHE[cache_key] = result
+        return result
+
+    user = (
+        f"Limit: {max_chars} characters.\n"
+        f"Description: {text}\n"
+        f"Abbreviated:"
+    )
+    try:
+        response = client.messages.create(
+            model=model,
+            max_tokens=80,
+            system=_ABBREV_SYSTEM,
+            messages=[{"role": "user", "content": user}],
+        )
+        raw = ""
+        for block in getattr(response, "content", []) or []:
+            if getattr(block, "type", None) == "text":
+                raw += getattr(block, "text", "") or ""
+        candidate = raw.strip().strip('"').strip("'").rstrip(".")
+        if not candidate:
+            raise ValueError("empty abbreviation response")
+        if len(candidate) > max_chars:
+            log.warning(
+                "Claude returned %d-char abbreviation (limit %d) for %r — truncating: %r",
+                len(candidate), max_chars, text, candidate,
+            )
+            candidate = _truncate_fallback(candidate, max_chars)
+        log.info("Abbreviated %r (%d) → %r (%d)", text, len(text), candidate, len(candidate))
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Abbreviation API call failed (%s) — truncating %r", exc, text)
+        candidate = _truncate_fallback(text, max_chars)
+
+    _ABBREV_CACHE[cache_key] = candidate
+    return candidate

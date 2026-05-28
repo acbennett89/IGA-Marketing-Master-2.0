@@ -52,13 +52,9 @@ CONFIG_FILENAME: str = "config.json"
 # submission-setup click sequence (cboBranch / cboProfitCenter on the
 # MKADMSTR header form). Department and Type of Business are constants
 # (per Andrew on 2026-05-18: always "CL" / "Commercial Lines").
-#
-# TODO(andrew): replace these placeholder lists with the real IGA
-# Agency / Branch / Profit Center codes. The "002" branch and "MM"
-# profit-center entries are inherited from v1's hard-coded defaults
-# and are known-good for Andrew's branch.
 SUBMISSION_AGENCY_OPTIONS: tuple[str, ...] = (
-    "(provide agency list)",
+    "IGA",   # Insurance Group of America LLC
+    "VA",    # IGA Virginia, LLC
 )
 SUBMISSION_BRANCH_OPTIONS: tuple[str, ...] = (
     "002",
@@ -82,6 +78,18 @@ EPIC_BASE_URL: str = "https://insu621.appliedepic.com/#/"
 # co-debugging selectors during automation iteration. Set to None to
 # skip the CDP exposure even in --debug mode.
 CDP_DEBUG_PORT: int | None = 9222
+
+# ---------------------------------------------------------------------------
+# Entry run reporting
+# ---------------------------------------------------------------------------
+# When validation errors are caught mid-run, screenshots + a structured log
+# are captured to `<Working Library>/<Client>/run_artifacts/<timestamp>/`.
+# The user can email the bundle from the busy dialog's "Send report" button.
+# Outlook COM is used to compose the message; auto-send sends silently via
+# Outlook in the background instead of opening a draft window.
+RUN_REPORT_ENABLED: bool = False
+RUN_REPORT_RECIPIENT: str = "andrew.bennett@iga.biz"
+OUTLOOK_AUTO_SEND: bool = False
 
 # Subset of Settings fields that get persisted to disk via save_user_config().
 # All other Settings fields are computed at load time from platformdirs / cwd.

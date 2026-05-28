@@ -38,6 +38,10 @@ desktop.ini
 # --- Project runtime state (per PLAN-REVIEW.md, never committed) ---
 Working Library/
 
+# --- Test sandbox (per-run state; fixtures are tracked, runtime state is not) ---
+testing/sandbox/working_library/
+testing/sandbox/logs/
+
 # --- Diagnostic ---
 # diagnostic_inputs/: PDFs are gitignored (real or synthetic, may contain PII);
 #   the README.md inside is tracked.
@@ -51,6 +55,11 @@ Testing and Example Library/Example Clients/
 *.bak
 *.tmp
 debug/
+
+# --- Loose inspection artifacts at repo root (CDP screenshots, snapshot dumps) ---
+/*.png
+/*-snapshot.md
+/snapshot-*.md
 
 # --- Secrets ---
 .env

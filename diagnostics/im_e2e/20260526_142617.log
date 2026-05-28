@@ -1,0 +1,399 @@
+14:26:17.341 INFO    iga.test_inland_marine e2e run starting — log_file=C:\Users\Andrew\Documents\GitHub\IGA-Marketing-Master-2.0\diagnostics\im_e2e\20260526_142617.log stop_file=C:\Users\Andrew\Documents\GitHub\IGA-Marketing-Master-2.0\diagnostics\im_e2e\STOP_NOW
+14:26:18.751 INFO    iga.epic_steps.inland_marine === Inland Marine entry step starting (state='TN') ===
+14:26:18.751 INFO    iga.epic_steps.inland_marine Setup: 48 sched, 6 unsched, 5 AI, 11 AC
+14:26:20.791 DEBUG   iga.epic_steps.inland_marine Clicked IM sidebar parent (attempt 1/4)
+14:26:20.791 INFO    iga.epic_steps.inland_marine === Step 1: Coverage / Deductible ===
+14:26:22.223 DEBUG   iga.epic_steps.inland_marine Navigated to EquipmentFloater.CoverageDeductible (CHM-EFCOVDED screen code present)
+14:26:22.223 INFO    iga.epic_steps.inland_marine === Coverage / Deductible (safe_action mode) ===
+14:26:23.903 DEBUG   iga.epic_steps.inland_marine radio rbtnScheduled checked after attempt 1
+14:26:24.687 DEBUG   iga.epic_steps.inland_marine kb_fill #streTotalScheduledAmount__textField = '5578487' OK
+14:26:24.903 INFO    iga.epic_steps.inland_marine Group 1 (amount) = Scheduled amount; total = 5578487 (sum of 48 item(s))
+14:26:25.062 DEBUG   iga.epic_steps.inland_marine radio rbtnAllRisks checked after attempt 1
+14:26:25.285 INFO    iga.epic_steps.inland_marine Group 2 (perils) = All risks
+14:26:25.436 DEBUG   iga.epic_steps.inland_marine radio rbtnReplacementCost checked after attempt 1
+14:26:25.664 INFO    iga.epic_steps.inland_marine Group 3 (cost basis) = Replacement cost
+14:26:26.449 DEBUG   iga.epic_steps.property fill_combo cboACVReplacementCostDedType = 'FL'  matched row 0 (priority 3)
+14:26:27.312 DEBUG   iga.epic_steps.inland_marine kb_fill #streACVReplacementCostDeductible__textField = '5000' OK
+14:26:27.963 INFO    iga.epic_steps.inland_marine Coverage/Deductible: filled cleanly
+14:26:27.963 INFO    iga.epic_steps.inland_marine === Step 2: Scheduled Equipment ===
+14:26:29.286 DEBUG   iga.epic_steps.inland_marine Navigated to EquipmentFloater.ScheduledEquipment (CHM-EFSCHEQU screen code present)
+14:26:29.294 DEBUG   iga.epic_steps.inland_marine EquipmentFloater.ScheduledEquipment: vlvwScheduledEquipment_add ready
+14:26:29.294 INFO    iga.epic_steps.inland_marine === Scheduled Equipment: 48 item(s) ===
+14:26:29.299 INFO    iga.epic_steps.inland_marine --- Row 1/48: desired item#=1, EPIC auto-fill will be 1, KOMATSU | PC2906CI-II | 2019 | Hydraulic Excavator | $364695
+14:26:29.341 DEBUG   iga.epic_steps.inland_marine Sched #1: rows_before=0
+14:26:32.965 WARNING iga.epic_steps.page_health wait_for(sched row 1 appeared) timed out after 3000 ms
+14:26:32.965 WARNING iga.epic_steps.inland_marine Sched #1: row count did not grow after Add (consecutive failures: 1/3)
+14:26:32.965 INFO    iga.epic_steps.inland_marine --- Row 2/48: desired item#=2, EPIC auto-fill will be 1, TOPCON KOMATSU | DZ 3DMC2 | - | GPS/Machine Control System | $45000
+14:26:32.970 DEBUG   iga.epic_steps.inland_marine Sched #2: rows_before=0
+14:26:33.232 DEBUG   iga.epic_steps.inland_marine Sched #2: row appeared (count 0 → 1)
+14:26:34.236 INFO    iga.epic_steps.inland_marine Sched #2: GAP — EPIC would auto-fill 1, we want 2. Overriding.
+14:26:34.623 DEBUG   iga.epic_steps.inland_marine kb_fill #inteItemNumber__textField = '2' OK
+14:26:34.838 DEBUG   iga.epic_steps.inland_marine Sched #2: item# override verified
+14:26:34.838 DEBUG   iga.epic_steps.inland_marine Sched #2: filling description (#streDescription) = 'GPS/Machine Control System'
+14:26:36.023 DEBUG   iga.epic_steps.inland_marine kb_fill #streDescription = 'GPS/Machine Control System' OK
+14:26:36.236 DEBUG   iga.epic_steps.inland_marine Sched #2: description verified OK
+14:26:36.236 DEBUG   iga.epic_steps.inland_marine Sched #2: serial blank — skipping
+14:26:36.236 DEBUG   iga.epic_steps.inland_marine Sched #2: filling manufacturer (#streManufacturer) = 'TOPCON KOMATSU'
+14:26:37.041 DEBUG   iga.epic_steps.inland_marine kb_fill #streManufacturer = 'TOPCON KOMATSU' OK
+14:26:37.257 DEBUG   iga.epic_steps.inland_marine Sched #2: manufacturer verified OK
+14:26:37.257 DEBUG   iga.epic_steps.inland_marine Sched #2: filling model (#streModel) = 'DZ 3DMC2'
+14:26:37.868 DEBUG   iga.epic_steps.inland_marine kb_fill #streModel = 'DZ 3DMC2' OK
+14:26:38.082 DEBUG   iga.epic_steps.inland_marine Sched #2: model verified OK
+14:26:38.082 DEBUG   iga.epic_steps.inland_marine Sched #2: year blank — skipping
+14:26:38.082 DEBUG   iga.epic_steps.inland_marine Sched #2: filling amount (#streAmtInsurance__textField) = '45000'
+14:26:38.606 DEBUG   iga.epic_steps.inland_marine kb_fill #streAmtInsurance__textField = '45000' OK
+14:26:38.821 DEBUG   iga.epic_steps.inland_marine Sched #2: amount verified OK
+14:26:39.126 DEBUG   iga.epic_steps.inland_marine Sched #2: row complete; expected_next=3
+14:26:39.126 INFO    iga.epic_steps.inland_marine --- Row 3/48: desired item#=3, EPIC auto-fill will be 3, TOPCON | GR5 BASE | 2016 | Grade Control Base Station | $16000
+14:26:39.130 DEBUG   iga.epic_steps.inland_marine Sched #3: rows_before=1
+14:26:39.553 DEBUG   iga.epic_steps.inland_marine Sched #3: row appeared (count 1 → 2)
+14:26:40.561 DEBUG   iga.epic_steps.inland_marine Sched #3: EPIC auto-fill (3) matches desired — no typing
+14:26:40.562 DEBUG   iga.epic_steps.inland_marine Sched #3: filling description (#streDescription) = 'Grade Control Base Station'
+14:26:41.733 DEBUG   iga.epic_steps.inland_marine kb_fill #streDescription = 'Grade Control Base Station' OK
+14:26:41.960 DEBUG   iga.epic_steps.inland_marine Sched #3: description verified OK
+14:26:41.960 DEBUG   iga.epic_steps.inland_marine Sched #3: filling serial (#streSerialNumber) = '111723100'
+14:26:42.611 DEBUG   iga.epic_steps.inland_marine kb_fill #streSerialNumber = '111723100' OK
+14:26:42.827 DEBUG   iga.epic_steps.inland_marine Sched #3: serial verified OK
+14:26:42.827 DEBUG   iga.epic_steps.inland_marine Sched #3: filling manufacturer (#streManufacturer) = 'TOPCON'
+14:26:43.385 DEBUG   iga.epic_steps.inland_marine kb_fill #streManufacturer = 'TOPCON' OK
+14:26:43.600 DEBUG   iga.epic_steps.inland_marine Sched #3: manufacturer verified OK
+14:26:43.600 DEBUG   iga.epic_steps.inland_marine Sched #3: filling model (#streModel) = 'GR5 BASE'
+14:26:44.202 DEBUG   iga.epic_steps.inland_marine kb_fill #streModel = 'GR5 BASE' OK
+14:26:44.414 DEBUG   iga.epic_steps.inland_marine Sched #3: model verified OK
+14:26:44.414 DEBUG   iga.epic_steps.inland_marine Sched #3: filling year (#inteModelYear__textField) = '2016'
+14:26:44.902 DEBUG   iga.epic_steps.inland_marine kb_fill #inteModelYear__textField = '2016' OK
+14:26:45.119 DEBUG   iga.epic_steps.inland_marine Sched #3: year verified OK
+14:26:45.119 DEBUG   iga.epic_steps.inland_marine Sched #3: filling amount (#streAmtInsurance__textField) = '16000'
+14:26:45.643 DEBUG   iga.epic_steps.inland_marine kb_fill #streAmtInsurance__textField = '16000' OK
+14:26:45.861 DEBUG   iga.epic_steps.inland_marine Sched #3: amount verified OK
+14:26:46.162 DEBUG   iga.epic_steps.inland_marine Sched #3: row complete; expected_next=4
+14:26:46.163 INFO    iga.epic_steps.inland_marine --- Row 4/48: desired item#=4, EPIC auto-fill will be 4, - | - | 2012 | Stump Splitter | $15000
+14:26:46.166 DEBUG   iga.epic_steps.inland_marine Sched #4: rows_before=2
+14:26:46.587 DEBUG   iga.epic_steps.inland_marine Sched #4: row appeared (count 2 → 3)
+14:26:47.601 DEBUG   iga.epic_steps.inland_marine Sched #4: EPIC auto-fill (4) matches desired — no typing
+14:26:47.602 DEBUG   iga.epic_steps.inland_marine Sched #4: filling description (#streDescription) = 'Stump Splitter'
+14:26:48.429 DEBUG   iga.epic_steps.inland_marine kb_fill #streDescription = 'Stump Splitter' OK
+14:26:48.644 DEBUG   iga.epic_steps.inland_marine Sched #4: description verified OK
+14:26:48.644 DEBUG   iga.epic_steps.inland_marine Sched #4: serial blank — skipping
+14:26:48.644 DEBUG   iga.epic_steps.inland_marine Sched #4: manufacturer blank — skipping
+14:26:48.644 DEBUG   iga.epic_steps.inland_marine Sched #4: model blank — skipping
+14:26:48.644 DEBUG   iga.epic_steps.inland_marine Sched #4: filling year (#inteModelYear__textField) = '2012'
+14:26:49.135 DEBUG   iga.epic_steps.inland_marine kb_fill #inteModelYear__textField = '2012' OK
+14:26:49.351 DEBUG   iga.epic_steps.inland_marine Sched #4: year verified OK
+14:26:49.351 DEBUG   iga.epic_steps.inland_marine Sched #4: filling amount (#streAmtInsurance__textField) = '15000'
+14:26:49.872 DEBUG   iga.epic_steps.inland_marine kb_fill #streAmtInsurance__textField = '15000' OK
+14:26:50.094 DEBUG   iga.epic_steps.inland_marine Sched #4: amount verified OK
+14:26:50.406 DEBUG   iga.epic_steps.inland_marine Sched #4: row complete; expected_next=5
+14:26:50.406 INFO    iga.epic_steps.inland_marine --- Row 5/48: desired item#=5, EPIC auto-fill will be 5, CAT | D6R | 2001 | Dozer | $100000
+14:26:50.410 DEBUG   iga.epic_steps.inland_marine Sched #5: rows_before=3
+14:26:50.825 DEBUG   iga.epic_steps.inland_marine Sched #5: row appeared (count 3 → 4)
+14:26:51.835 DEBUG   iga.epic_steps.inland_marine Sched #5: EPIC auto-fill (5) matches desired — no typing
+14:26:51.836 DEBUG   iga.epic_steps.inland_marine Sched #5: filling description (#streDescription) = 'Dozer'
+14:26:52.365 DEBUG   iga.epic_steps.inland_marine kb_fill #streDescription = 'Dozer' OK
+14:26:52.579 DEBUG   iga.epic_steps.inland_marine Sched #5: description verified OK
+14:26:52.579 DEBUG   iga.epic_steps.inland_marine Sched #5: filling serial (#streSerialNumber) = 'D6R5LM02724'
+14:26:53.293 DEBUG   iga.epic_steps.inland_marine kb_fill #streSerialNumber = 'D6R5LM02724' OK
+14:26:53.508 DEBUG   iga.epic_steps.inland_marine Sched #5: serial verified OK
+14:26:53.509 DEBUG   iga.epic_steps.inland_marine Sched #5: filling manufacturer (#streManufacturer) = 'CAT'
+14:26:53.970 DEBUG   iga.epic_steps.inland_marine kb_fill #streManufacturer = 'CAT' OK
+14:26:54.185 DEBUG   iga.epic_steps.inland_marine Sched #5: manufacturer verified OK
+14:26:54.185 DEBUG   iga.epic_steps.inland_marine Sched #5: filling model (#streModel) = 'D6R'
+14:26:54.646 DEBUG   iga.epic_steps.inland_marine kb_fill #streModel = 'D6R' OK
+14:26:54.861 DEBUG   iga.epic_steps.inland_marine Sched #5: model verified OK
+14:26:54.861 DEBUG   iga.epic_steps.inland_marine Sched #5: filling year (#inteModelYear__textField) = '2001'
+14:26:55.348 DEBUG   iga.epic_steps.inland_marine kb_fill #inteModelYear__textField = '2001' OK
+14:26:55.565 DEBUG   iga.epic_steps.inland_marine Sched #5: year verified OK
+14:26:55.565 DEBUG   iga.epic_steps.inland_marine Sched #5: filling amount (#streAmtInsurance__textField) = '100000'
+14:26:56.115 DEBUG   iga.epic_steps.inland_marine kb_fill #streAmtInsurance__textField = '100000' OK
+14:26:56.333 DEBUG   iga.epic_steps.inland_marine Sched #5: amount verified OK
+14:26:56.635 DEBUG   iga.epic_steps.inland_marine Sched #5: row complete; expected_next=6
+14:26:56.635 INFO    iga.epic_steps.inland_marine --- Row 6/48: desired item#=6, EPIC auto-fill will be 6, KOMATSU | 250 | 2001 | Wheel Loader | $40000
+14:26:56.639 DEBUG   iga.epic_steps.inland_marine Sched #6: rows_before=4
+14:26:57.058 DEBUG   iga.epic_steps.inland_marine Sched #6: row appeared (count 4 → 5)
+14:26:58.076 DEBUG   iga.epic_steps.inland_marine Sched #6: EPIC auto-fill (6) matches desired — no typing
+14:26:58.076 DEBUG   iga.epic_steps.inland_marine Sched #6: filling description (#streDescription) = 'Wheel Loader'
+14:26:58.826 DEBUG   iga.epic_steps.inland_marine kb_fill #streDescription = 'Wheel Loader' OK
+14:26:59.042 DEBUG   iga.epic_steps.inland_marine Sched #6: description verified OK
+14:26:59.042 DEBUG   iga.epic_steps.inland_marine Sched #6: filling serial (#streSerialNumber) = '53420'
+14:26:59.560 DEBUG   iga.epic_steps.inland_marine kb_fill #streSerialNumber = '53420' OK
+14:26:59.777 DEBUG   iga.epic_steps.inland_marine Sched #6: serial verified OK
+14:26:59.777 DEBUG   iga.epic_steps.inland_marine Sched #6: filling manufacturer (#streManufacturer) = 'KOMATSU'
+14:27:00.371 DEBUG   iga.epic_steps.inland_marine kb_fill #streManufacturer = 'KOMATSU' OK
+14:27:00.587 DEBUG   iga.epic_steps.inland_marine Sched #6: manufacturer verified OK
+14:27:00.587 DEBUG   iga.epic_steps.inland_marine Sched #6: filling model (#streModel) = '250'
+14:27:01.047 DEBUG   iga.epic_steps.inland_marine kb_fill #streModel = '250' OK
+14:27:01.263 DEBUG   iga.epic_steps.inland_marine Sched #6: model verified OK
+14:27:01.263 DEBUG   iga.epic_steps.inland_marine Sched #6: filling year (#inteModelYear__textField) = '2001'
+14:27:01.754 DEBUG   iga.epic_steps.inland_marine kb_fill #inteModelYear__textField = '2001' OK
+14:27:01.983 DEBUG   iga.epic_steps.inland_marine Sched #6: year verified OK
+14:27:01.983 DEBUG   iga.epic_steps.inland_marine Sched #6: filling amount (#streAmtInsurance__textField) = '40000'
+14:27:02.509 DEBUG   iga.epic_steps.inland_marine kb_fill #streAmtInsurance__textField = '40000' OK
+14:27:02.723 DEBUG   iga.epic_steps.inland_marine Sched #6: amount verified OK
+14:27:03.040 DEBUG   iga.epic_steps.inland_marine Sched #6: row complete; expected_next=7
+14:27:03.040 INFO    iga.epic_steps.inland_marine --- Row 7/48: desired item#=7, EPIC auto-fill will be 7, KOMATSU | WA320-7 | 2019 | Wheel Loader | $79000
+14:27:03.044 DEBUG   iga.epic_steps.inland_marine Sched #7: rows_before=5
+14:27:03.621 DEBUG   iga.epic_steps.inland_marine Sched #7: row appeared (count 5 → 6)
+14:27:04.639 DEBUG   iga.epic_steps.inland_marine Sched #7: EPIC auto-fill (7) matches desired — no typing
+14:27:04.639 DEBUG   iga.epic_steps.inland_marine Sched #7: filling description (#streDescription) = 'Wheel Loader'
+14:27:05.409 DEBUG   iga.epic_steps.inland_marine kb_fill #streDescription = 'Wheel Loader' OK
+14:27:05.628 DEBUG   iga.epic_steps.inland_marine Sched #7: description verified OK
+14:27:05.628 DEBUG   iga.epic_steps.inland_marine Sched #7: filling serial (#streSerialNumber) = 'A36590'
+14:27:06.181 DEBUG   iga.epic_steps.inland_marine kb_fill #streSerialNumber = 'A36590' OK
+14:27:06.395 DEBUG   iga.epic_steps.inland_marine Sched #7: serial verified OK
+14:27:06.395 DEBUG   iga.epic_steps.inland_marine Sched #7: filling manufacturer (#streManufacturer) = 'KOMATSU'
+14:27:06.981 DEBUG   iga.epic_steps.inland_marine kb_fill #streManufacturer = 'KOMATSU' OK
+14:27:07.195 DEBUG   iga.epic_steps.inland_marine Sched #7: manufacturer verified OK
+14:27:07.195 DEBUG   iga.epic_steps.inland_marine Sched #7: filling model (#streModel) = 'WA320-7'
+14:27:07.795 DEBUG   iga.epic_steps.inland_marine kb_fill #streModel = 'WA320-7' OK
+14:27:08.011 DEBUG   iga.epic_steps.inland_marine Sched #7: model verified OK
+14:27:08.011 DEBUG   iga.epic_steps.inland_marine Sched #7: filling year (#inteModelYear__textField) = '2019'
+14:27:08.502 DEBUG   iga.epic_steps.inland_marine kb_fill #inteModelYear__textField = '2019' OK
+14:27:08.727 DEBUG   iga.epic_steps.inland_marine Sched #7: year verified OK
+14:27:08.727 DEBUG   iga.epic_steps.inland_marine Sched #7: filling amount (#streAmtInsurance__textField) = '79000'
+14:27:09.287 DEBUG   iga.epic_steps.inland_marine kb_fill #streAmtInsurance__textField = '79000' OK
+14:27:09.503 DEBUG   iga.epic_steps.inland_marine Sched #7: amount verified OK
+14:27:09.816 DEBUG   iga.epic_steps.inland_marine Sched #7: row complete; expected_next=8
+14:27:09.816 INFO    iga.epic_steps.inland_marine --- Row 8/48: desired item#=8, EPIC auto-fill will be 8, KOMATSU | PC210LCI-II | - | Excavator | $239220
+14:27:09.821 DEBUG   iga.epic_steps.inland_marine Sched #8: rows_before=6
+14:27:10.261 DEBUG   iga.epic_steps.inland_marine Sched #8: row appeared (count 6 → 7)
+14:27:11.275 DEBUG   iga.epic_steps.inland_marine Sched #8: EPIC auto-fill (8) matches desired — no typing
+14:27:11.275 DEBUG   iga.epic_steps.inland_marine Sched #8: filling description (#streDescription) = 'Excavator'
+14:27:11.929 DEBUG   iga.epic_steps.inland_marine kb_fill #streDescription = 'Excavator' OK
+14:27:12.143 DEBUG   iga.epic_steps.inland_marine Sched #8: description verified OK
+14:27:12.143 DEBUG   iga.epic_steps.inland_marine Sched #8: filling serial (#streSerialNumber) = '501471'
+14:27:12.695 DEBUG   iga.epic_steps.inland_marine kb_fill #streSerialNumber = '501471' OK
+14:27:12.913 DEBUG   iga.epic_steps.inland_marine Sched #8: serial verified OK
+14:27:12.913 DEBUG   iga.epic_steps.inland_marine Sched #8: filling manufacturer (#streManufacturer) = 'KOMATSU'
+14:27:13.498 DEBUG   iga.epic_steps.inland_marine kb_fill #streManufacturer = 'KOMATSU' OK
+14:27:13.716 DEBUG   iga.epic_steps.inland_marine Sched #8: manufacturer verified OK
+14:27:13.716 DEBUG   iga.epic_steps.inland_marine Sched #8: filling model (#streModel) = 'PC210LCI-II'
+14:27:14.445 DEBUG   iga.epic_steps.inland_marine kb_fill #streModel = 'PC210LCI-II' OK
+14:27:14.665 DEBUG   iga.epic_steps.inland_marine Sched #8: model verified OK
+14:27:14.665 DEBUG   iga.epic_steps.inland_marine Sched #8: year blank — skipping
+14:27:14.665 DEBUG   iga.epic_steps.inland_marine Sched #8: filling amount (#streAmtInsurance__textField) = '239220'
+14:27:15.219 DEBUG   iga.epic_steps.inland_marine kb_fill #streAmtInsurance__textField = '239220' OK
+14:27:15.436 DEBUG   iga.epic_steps.inland_marine Sched #8: amount verified OK
+14:27:15.753 DEBUG   iga.epic_steps.inland_marine Sched #8: row complete; expected_next=9
+14:27:15.753 INFO    iga.epic_steps.inland_marine --- Row 9/48: desired item#=9, EPIC auto-fill will be 9, KOMATSU | PC 300 | 2005 | Excavator | $125000
+14:27:15.757 DEBUG   iga.epic_steps.inland_marine Sched #9: rows_before=7
+14:27:16.188 DEBUG   iga.epic_steps.inland_marine Sched #9: row appeared (count 7 → 8)
+14:27:17.201 DEBUG   iga.epic_steps.inland_marine Sched #9: EPIC auto-fill (9) matches desired — no typing
+14:27:17.202 DEBUG   iga.epic_steps.inland_marine Sched #9: filling description (#streDescription) = 'Excavator'
+14:27:17.855 DEBUG   iga.epic_steps.inland_marine kb_fill #streDescription = 'Excavator' OK
+14:27:18.078 DEBUG   iga.epic_steps.inland_marine Sched #9: description verified OK
+14:27:18.078 DEBUG   iga.epic_steps.inland_marine Sched #9: filling serial (#streSerialNumber) = 'A86605'
+14:27:18.624 DEBUG   iga.epic_steps.inland_marine kb_fill #streSerialNumber = 'A86605' OK
+14:27:18.841 DEBUG   iga.epic_steps.inland_marine Sched #9: serial verified OK
+14:27:18.841 DEBUG   iga.epic_steps.inland_marine Sched #9: filling manufacturer (#streManufacturer) = 'KOMATSU'
+14:27:19.436 DEBUG   iga.epic_steps.inland_marine kb_fill #streManufacturer = 'KOMATSU' OK
+14:27:19.652 DEBUG   iga.epic_steps.inland_marine Sched #9: manufacturer verified OK
+14:27:19.652 DEBUG   iga.epic_steps.inland_marine Sched #9: filling model (#streModel) = 'PC 300'
+14:27:20.206 DEBUG   iga.epic_steps.inland_marine kb_fill #streModel = 'PC 300' OK
+14:27:20.421 DEBUG   iga.epic_steps.inland_marine Sched #9: model verified OK
+14:27:20.421 DEBUG   iga.epic_steps.inland_marine Sched #9: filling year (#inteModelYear__textField) = '2005'
+14:27:20.911 DEBUG   iga.epic_steps.inland_marine kb_fill #inteModelYear__textField = '2005' OK
+14:27:21.130 DEBUG   iga.epic_steps.inland_marine Sched #9: year verified OK
+14:27:21.130 DEBUG   iga.epic_steps.inland_marine Sched #9: filling amount (#streAmtInsurance__textField) = '125000'
+14:27:21.697 DEBUG   iga.epic_steps.inland_marine kb_fill #streAmtInsurance__textField = '125000' OK
+14:27:21.911 DEBUG   iga.epic_steps.inland_marine Sched #9: amount verified OK
+14:27:22.226 DEBUG   iga.epic_steps.inland_marine Sched #9: row complete; expected_next=10
+14:27:22.226 INFO    iga.epic_steps.inland_marine --- Row 10/48: desired item#=10, EPIC auto-fill will be 10, KOMATSU | D39-23 | 2014 | Dozer | $102000
+14:27:22.230 DEBUG   iga.epic_steps.inland_marine Sched #10: rows_before=8
+14:27:22.649 DEBUG   iga.epic_steps.inland_marine Sched #10: row appeared (count 8 → 9)
+14:27:23.667 DEBUG   iga.epic_steps.inland_marine Sched #10: EPIC auto-fill (10) matches desired — no typing
+14:27:23.667 DEBUG   iga.epic_steps.inland_marine Sched #10: filling description (#streDescription) = 'Dozer'
+14:27:24.200 DEBUG   iga.epic_steps.inland_marine kb_fill #streDescription = 'Dozer' OK
+14:27:24.416 DEBUG   iga.epic_steps.inland_marine Sched #10: description verified OK
+14:27:24.416 DEBUG   iga.epic_steps.inland_marine Sched #10: filling serial (#streSerialNumber) = '90530'
+14:27:24.940 DEBUG   iga.epic_steps.inland_marine kb_fill #streSerialNumber = '90530' OK
+14:27:25.154 DEBUG   iga.epic_steps.inland_marine Sched #10: serial verified OK
+14:27:25.154 DEBUG   iga.epic_steps.inland_marine Sched #10: filling manufacturer (#streManufacturer) = 'KOMATSU'
+14:27:25.753 DEBUG   iga.epic_steps.inland_marine kb_fill #streManufacturer = 'KOMATSU' OK
+14:27:25.967 DEBUG   iga.epic_steps.inland_marine Sched #10: manufacturer verified OK
+14:27:25.967 DEBUG   iga.epic_steps.inland_marine Sched #10: filling model (#streModel) = 'D39-23'
+14:27:26.534 DEBUG   iga.epic_steps.inland_marine kb_fill #streModel = 'D39-23' OK
+14:27:26.748 DEBUG   iga.epic_steps.inland_marine Sched #10: model verified OK
+14:27:26.748 DEBUG   iga.epic_steps.inland_marine Sched #10: filling year (#inteModelYear__textField) = '2014'
+14:27:27.238 DEBUG   iga.epic_steps.inland_marine kb_fill #inteModelYear__textField = '2014' OK
+14:27:27.453 DEBUG   iga.epic_steps.inland_marine Sched #10: year verified OK
+14:27:27.453 DEBUG   iga.epic_steps.inland_marine Sched #10: filling amount (#streAmtInsurance__textField) = '102000'
+14:27:28.027 DEBUG   iga.epic_steps.inland_marine kb_fill #streAmtInsurance__textField = '102000' OK
+14:27:28.246 DEBUG   iga.epic_steps.inland_marine Sched #10: amount verified OK
+14:27:28.560 DEBUG   iga.epic_steps.inland_marine Sched #10: row complete; expected_next=11
+14:27:28.560 INFO    iga.epic_steps.inland_marine --- Row 11/48: desired item#=11, EPIC auto-fill will be 11, POLARIS | RANGER | 2015 | Utility Vehicle | $13000
+14:27:28.564 DEBUG   iga.epic_steps.inland_marine Sched #11: rows_before=9
+14:27:29.001 DEBUG   iga.epic_steps.inland_marine Sched #11: row appeared (count 9 → 10)
+14:27:30.015 DEBUG   iga.epic_steps.inland_marine Sched #11: EPIC auto-fill (11) matches desired — no typing
+14:27:30.015 DEBUG   iga.epic_steps.inland_marine Sched #11: filling description (#streDescription) = 'Utility Vehicle'
+14:27:30.859 DEBUG   iga.epic_steps.inland_marine kb_fill #streDescription = 'Utility Vehicle' OK
+14:27:31.077 DEBUG   iga.epic_steps.inland_marine Sched #11: description verified OK
+14:27:31.077 DEBUG   iga.epic_steps.inland_marine Sched #11: filling serial (#streSerialNumber) = '4XARTE871GB330717'
+14:27:31.968 DEBUG   iga.epic_steps.inland_marine kb_fill #streSerialNumber = '4XARTE871GB330717' OK
+14:27:32.182 DEBUG   iga.epic_steps.inland_marine Sched #11: serial verified OK
+14:27:32.183 DEBUG   iga.epic_steps.inland_marine Sched #11: filling manufacturer (#streManufacturer) = 'POLARIS'
+14:27:32.762 DEBUG   iga.epic_steps.inland_marine kb_fill #streManufacturer = 'POLARIS' OK
+14:27:32.976 DEBUG   iga.epic_steps.inland_marine Sched #11: manufacturer verified OK
+14:27:32.976 DEBUG   iga.epic_steps.inland_marine Sched #11: filling model (#streModel) = 'RANGER'
+14:27:33.558 DEBUG   iga.epic_steps.inland_marine kb_fill #streModel = 'RANGER' OK
+14:27:33.775 DEBUG   iga.epic_steps.inland_marine Sched #11: model verified OK
+14:27:33.775 DEBUG   iga.epic_steps.inland_marine Sched #11: filling year (#inteModelYear__textField) = '2015'
+14:27:34.263 DEBUG   iga.epic_steps.inland_marine kb_fill #inteModelYear__textField = '2015' OK
+14:27:34.479 DEBUG   iga.epic_steps.inland_marine Sched #11: year verified OK
+14:27:34.479 DEBUG   iga.epic_steps.inland_marine Sched #11: filling amount (#streAmtInsurance__textField) = '13000'
+14:27:35.022 DEBUG   iga.epic_steps.inland_marine kb_fill #streAmtInsurance__textField = '13000' OK
+14:27:35.239 DEBUG   iga.epic_steps.inland_marine Sched #11: amount verified OK
+14:27:35.540 DEBUG   iga.epic_steps.inland_marine Sched #11: row complete; expected_next=12
+14:27:35.541 INFO    iga.epic_steps.inland_marine --- Row 12/48: desired item#=13, EPIC auto-fill will be 12, MILLER | - | - | Welder Gas Powered | $7500
+14:27:35.544 DEBUG   iga.epic_steps.inland_marine Sched #12: rows_before=10
+14:27:35.969 DEBUG   iga.epic_steps.inland_marine Sched #12: row appeared (count 10 → 11)
+14:27:36.974 INFO    iga.epic_steps.inland_marine Sched #12: GAP — EPIC would auto-fill 12, we want 13. Overriding.
+14:27:37.416 DEBUG   iga.epic_steps.inland_marine kb_fill #inteItemNumber__textField = '13' OK
+14:27:37.630 DEBUG   iga.epic_steps.inland_marine Sched #12: item# override verified
+14:27:37.631 DEBUG   iga.epic_steps.inland_marine Sched #12: filling description (#streDescription) = 'Welder Gas Powered'
+14:27:38.563 DEBUG   iga.epic_steps.inland_marine kb_fill #streDescription = 'Welder Gas Powered' OK
+14:27:38.783 DEBUG   iga.epic_steps.inland_marine Sched #12: description verified OK
+14:27:38.783 DEBUG   iga.epic_steps.inland_marine Sched #12: serial blank — skipping
+14:27:38.783 DEBUG   iga.epic_steps.inland_marine Sched #12: filling manufacturer (#streManufacturer) = 'MILLER'
+14:27:39.343 DEBUG   iga.epic_steps.inland_marine kb_fill #streManufacturer = 'MILLER' OK
+14:27:39.572 DEBUG   iga.epic_steps.inland_marine Sched #12: manufacturer verified OK
+14:27:39.572 DEBUG   iga.epic_steps.inland_marine Sched #12: model blank — skipping
+14:27:39.572 DEBUG   iga.epic_steps.inland_marine Sched #12: year blank — skipping
+14:27:39.572 DEBUG   iga.epic_steps.inland_marine Sched #12: filling amount (#streAmtInsurance__textField) = '7500'
+14:27:40.106 DEBUG   iga.epic_steps.inland_marine kb_fill #streAmtInsurance__textField = '7500' OK
+14:27:40.323 DEBUG   iga.epic_steps.inland_marine Sched #12: amount verified OK
+14:27:40.640 DEBUG   iga.epic_steps.inland_marine Sched #12: row complete; expected_next=14
+14:27:40.640 INFO    iga.epic_steps.inland_marine --- Row 13/48: desired item#=14, EPIC auto-fill will be 14, - | - | - | Skid Steer Attachment | $12500
+14:27:40.644 DEBUG   iga.epic_steps.inland_marine Sched #13: rows_before=11
+14:27:41.065 DEBUG   iga.epic_steps.inland_marine Sched #13: row appeared (count 11 → 12)
+14:27:42.081 DEBUG   iga.epic_steps.inland_marine Sched #13: EPIC auto-fill (14) matches desired — no typing
+14:27:42.082 DEBUG   iga.epic_steps.inland_marine Sched #13: filling description (#streDescription) = 'Skid Steer Attachment'
+14:27:43.110 DEBUG   iga.epic_steps.inland_marine kb_fill #streDescription = 'Skid Steer Attachment' OK
+14:27:43.338 DEBUG   iga.epic_steps.inland_marine Sched #13: description verified OK
+14:27:43.338 DEBUG   iga.epic_steps.inland_marine Sched #13: serial blank — skipping
+14:27:43.338 DEBUG   iga.epic_steps.inland_marine Sched #13: manufacturer blank — skipping
+14:27:43.338 DEBUG   iga.epic_steps.inland_marine Sched #13: model blank — skipping
+14:27:43.338 DEBUG   iga.epic_steps.inland_marine Sched #13: year blank — skipping
+14:27:43.338 DEBUG   iga.epic_steps.inland_marine Sched #13: filling amount (#streAmtInsurance__textField) = '12500'
+14:27:43.890 DEBUG   iga.epic_steps.inland_marine kb_fill #streAmtInsurance__textField = '12500' OK
+14:27:44.119 DEBUG   iga.epic_steps.inland_marine Sched #13: amount verified OK
+14:27:44.421 DEBUG   iga.epic_steps.inland_marine Sched #13: row complete; expected_next=15
+14:27:44.422 INFO    iga.epic_steps.inland_marine --- Row 14/48: desired item#=15, EPIC auto-fill will be 15, FECON | - | 2017 | Mulching Head | $26287
+14:27:44.426 DEBUG   iga.epic_steps.inland_marine Sched #14: rows_before=12
+14:27:45.005 DEBUG   iga.epic_steps.inland_marine Sched #14: row appeared (count 12 → 13)
+14:27:46.019 DEBUG   iga.epic_steps.inland_marine Sched #14: EPIC auto-fill (15) matches desired — no typing
+14:27:46.019 DEBUG   iga.epic_steps.inland_marine Sched #14: filling description (#streDescription) = 'Mulching Head'
+14:27:46.808 DEBUG   iga.epic_steps.inland_marine kb_fill #streDescription = 'Mulching Head' OK
+14:27:47.022 DEBUG   iga.epic_steps.inland_marine Sched #14: description verified OK
+14:27:47.022 DEBUG   iga.epic_steps.inland_marine Sched #14: filling serial (#streSerialNumber) = '00BH74011639'
+14:27:47.766 DEBUG   iga.epic_steps.inland_marine kb_fill #streSerialNumber = '00BH74011639' OK
+14:27:47.982 DEBUG   iga.epic_steps.inland_marine Sched #14: serial verified OK
+14:27:47.982 DEBUG   iga.epic_steps.inland_marine Sched #14: filling manufacturer (#streManufacturer) = 'FECON'
+14:27:48.519 DEBUG   iga.epic_steps.inland_marine kb_fill #streManufacturer = 'FECON' OK
+14:27:48.735 DEBUG   iga.epic_steps.inland_marine Sched #14: manufacturer verified OK
+14:27:48.735 DEBUG   iga.epic_steps.inland_marine Sched #14: model blank — skipping
+14:27:48.735 DEBUG   iga.epic_steps.inland_marine Sched #14: filling year (#inteModelYear__textField) = '2017'
+14:27:49.244 DEBUG   iga.epic_steps.inland_marine kb_fill #inteModelYear__textField = '2017' OK
+14:27:49.458 DEBUG   iga.epic_steps.inland_marine Sched #14: year verified OK
+14:27:49.458 DEBUG   iga.epic_steps.inland_marine Sched #14: filling amount (#streAmtInsurance__textField) = '26287'
+14:27:50.024 DEBUG   iga.epic_steps.inland_marine kb_fill #streAmtInsurance__textField = '26287' OK
+14:27:50.239 DEBUG   iga.epic_steps.inland_marine Sched #14: amount verified OK
+14:27:50.541 DEBUG   iga.epic_steps.inland_marine Sched #14: row complete; expected_next=16
+14:27:50.541 INFO    iga.epic_steps.inland_marine --- Row 15/48: desired item#=16, EPIC auto-fill will be 16, BRAMCO | - | 2017 | Rake for Skidsteer | $5951
+14:27:50.546 DEBUG   iga.epic_steps.inland_marine Sched #15: rows_before=13
+14:27:51.136 DEBUG   iga.epic_steps.inland_marine Sched #15: row appeared (count 13 → 14)
+14:27:52.145 DEBUG   iga.epic_steps.inland_marine Sched #15: EPIC auto-fill (16) matches desired — no typing
+14:27:52.145 DEBUG   iga.epic_steps.inland_marine Sched #15: filling description (#streDescription) = 'Rake for Skidsteer'
+14:27:53.088 DEBUG   iga.epic_steps.inland_marine kb_fill #streDescription = 'Rake for Skidsteer' OK
+14:27:53.302 DEBUG   iga.epic_steps.inland_marine Sched #15: description verified OK
+14:27:53.302 DEBUG   iga.epic_steps.inland_marine Sched #15: serial blank — skipping
+14:27:53.302 DEBUG   iga.epic_steps.inland_marine Sched #15: filling manufacturer (#streManufacturer) = 'BRAMCO'
+14:27:53.872 DEBUG   iga.epic_steps.inland_marine kb_fill #streManufacturer = 'BRAMCO' OK
+14:27:54.089 DEBUG   iga.epic_steps.inland_marine Sched #15: manufacturer verified OK
+14:27:54.089 DEBUG   iga.epic_steps.inland_marine Sched #15: model blank — skipping
+14:27:54.089 DEBUG   iga.epic_steps.inland_marine Sched #15: filling year (#inteModelYear__textField) = '2017'
+14:27:54.598 DEBUG   iga.epic_steps.inland_marine kb_fill #inteModelYear__textField = '2017' OK
+14:27:54.812 DEBUG   iga.epic_steps.inland_marine Sched #15: year verified OK
+14:27:54.812 DEBUG   iga.epic_steps.inland_marine Sched #15: filling amount (#streAmtInsurance__textField) = '5951'
+14:27:55.333 DEBUG   iga.epic_steps.inland_marine kb_fill #streAmtInsurance__textField = '5951' OK
+14:27:55.550 DEBUG   iga.epic_steps.inland_marine Sched #15: amount verified OK
+14:27:55.852 DEBUG   iga.epic_steps.inland_marine Sched #15: row complete; expected_next=17
+14:27:55.853 INFO    iga.epic_steps.inland_marine --- Row 16/48: desired item#=17, EPIC auto-fill will be 17, - | - | - | Silt Fence Plow | $2500
+14:27:55.857 DEBUG   iga.epic_steps.inland_marine Sched #16: rows_before=14
+14:27:56.289 DEBUG   iga.epic_steps.inland_marine Sched #16: row appeared (count 14 → 15)
+14:27:57.297 DEBUG   iga.epic_steps.inland_marine Sched #16: EPIC auto-fill (17) matches desired — no typing
+14:27:57.297 DEBUG   iga.epic_steps.inland_marine Sched #16: filling description (#streDescription) = 'Silt Fence Plow'
+14:27:58.147 DEBUG   iga.epic_steps.inland_marine kb_fill #streDescription = 'Silt Fence Plow' OK
+14:27:58.362 DEBUG   iga.epic_steps.inland_marine Sched #16: description verified OK
+14:27:58.363 DEBUG   iga.epic_steps.inland_marine Sched #16: serial blank — skipping
+14:27:58.363 DEBUG   iga.epic_steps.inland_marine Sched #16: manufacturer blank — skipping
+14:27:58.363 DEBUG   iga.epic_steps.inland_marine Sched #16: model blank — skipping
+14:27:58.363 DEBUG   iga.epic_steps.inland_marine Sched #16: year blank — skipping
+14:27:58.363 DEBUG   iga.epic_steps.inland_marine Sched #16: filling amount (#streAmtInsurance__textField) = '2500'
+14:27:58.883 DEBUG   iga.epic_steps.inland_marine kb_fill #streAmtInsurance__textField = '2500' OK
+14:27:59.096 DEBUG   iga.epic_steps.inland_marine Sched #16: amount verified OK
+14:27:59.398 DEBUG   iga.epic_steps.inland_marine Sched #16: row complete; expected_next=18
+14:27:59.398 INFO    iga.epic_steps.inland_marine --- Row 17/48: desired item#=18, EPIC auto-fill will be 18, BIG BUD | 525/50 | - | Tractor | $150000
+14:27:59.402 DEBUG   iga.epic_steps.inland_marine Sched #17: rows_before=15
+14:27:59.824 DEBUG   iga.epic_steps.inland_marine Sched #17: row appeared (count 15 → 16)
+14:28:00.832 DEBUG   iga.epic_steps.inland_marine Sched #17: EPIC auto-fill (18) matches desired — no typing
+14:28:00.832 DEBUG   iga.epic_steps.inland_marine Sched #17: filling description (#streDescription) = 'Tractor'
+14:28:01.424 DEBUG   iga.epic_steps.inland_marine kb_fill #streDescription = 'Tractor' OK
+14:28:01.639 DEBUG   iga.epic_steps.inland_marine Sched #17: description verified OK
+14:28:01.639 DEBUG   iga.epic_steps.inland_marine Sched #17: filling serial (#streSerialNumber) = 'XXXX'
+14:28:02.133 DEBUG   iga.epic_steps.inland_marine kb_fill #streSerialNumber = 'XXXX' OK
+14:28:02.354 DEBUG   iga.epic_steps.inland_marine Sched #17: serial verified OK
+14:28:02.354 DEBUG   iga.epic_steps.inland_marine Sched #17: filling manufacturer (#streManufacturer) = 'BIG BUD'
+14:28:02.947 DEBUG   iga.epic_steps.inland_marine kb_fill #streManufacturer = 'BIG BUD' OK
+14:28:03.163 DEBUG   iga.epic_steps.inland_marine Sched #17: manufacturer verified OK
+14:28:03.163 DEBUG   iga.epic_steps.inland_marine Sched #17: filling model (#streModel) = '525/50'
+14:28:03.715 DEBUG   iga.epic_steps.inland_marine kb_fill #streModel = '525/50' OK
+14:28:03.934 DEBUG   iga.epic_steps.inland_marine Sched #17: model verified OK
+14:28:03.934 DEBUG   iga.epic_steps.inland_marine Sched #17: year blank — skipping
+14:28:03.934 DEBUG   iga.epic_steps.inland_marine Sched #17: filling amount (#streAmtInsurance__textField) = '150000'
+14:28:04.514 DEBUG   iga.epic_steps.inland_marine kb_fill #streAmtInsurance__textField = '150000' OK
+14:28:04.731 DEBUG   iga.epic_steps.inland_marine Sched #17: amount verified OK
+14:28:05.045 DEBUG   iga.epic_steps.inland_marine Sched #17: row complete; expected_next=19
+14:28:05.045 INFO    iga.epic_steps.inland_marine --- Row 18/48: desired item#=19, EPIC auto-fill will be 19, TOPCON | GR5 BASE | 2019 | Grade Control Base Station | $19000
+14:28:05.050 DEBUG   iga.epic_steps.inland_marine Sched #18: rows_before=16
+14:28:05.462 DEBUG   iga.epic_steps.inland_marine Sched #18: row appeared (count 16 → 17)
+14:28:06.472 DEBUG   iga.epic_steps.inland_marine Sched #18: EPIC auto-fill (19) matches desired — no typing
+14:28:06.473 DEBUG   iga.epic_steps.inland_marine Sched #18: filling description (#streDescription) = 'Grade Control Base Station'
+14:28:07.692 DEBUG   iga.epic_steps.inland_marine kb_fill #streDescription = 'Grade Control Base Station' OK
+14:28:07.909 DEBUG   iga.epic_steps.inland_marine Sched #18: description verified OK
+14:28:07.909 DEBUG   iga.epic_steps.inland_marine Sched #18: filling serial (#streSerialNumber) = '1117-24917'
+14:28:08.583 DEBUG   iga.epic_steps.inland_marine kb_fill #streSerialNumber = '1117-24917' OK
+14:28:08.797 DEBUG   iga.epic_steps.inland_marine Sched #18: serial verified OK
+14:28:08.797 DEBUG   iga.epic_steps.inland_marine Sched #18: filling manufacturer (#streManufacturer) = 'TOPCON'
+14:28:09.375 DEBUG   iga.epic_steps.inland_marine kb_fill #streManufacturer = 'TOPCON' OK
+14:28:09.592 DEBUG   iga.epic_steps.inland_marine Sched #18: manufacturer verified OK
+14:28:09.592 DEBUG   iga.epic_steps.inland_marine Sched #18: filling model (#streModel) = 'GR5 BASE'
+14:28:10.224 DEBUG   iga.epic_steps.inland_marine kb_fill #streModel = 'GR5 BASE' OK
+14:28:10.538 DEBUG   iga.epic_steps.inland_marine Sched #18: model verified OK
+14:28:10.538 DEBUG   iga.epic_steps.inland_marine Sched #18: filling year (#inteModelYear__textField) = '2019'
+14:28:11.044 DEBUG   iga.epic_steps.inland_marine kb_fill #inteModelYear__textField = '2019' OK
+14:28:11.261 DEBUG   iga.epic_steps.inland_marine Sched #18: year verified OK
+14:28:11.262 DEBUG   iga.epic_steps.inland_marine Sched #18: filling amount (#streAmtInsurance__textField) = '19000'
+14:28:11.812 DEBUG   iga.epic_steps.inland_marine kb_fill #streAmtInsurance__textField = '19000' OK
+14:28:12.029 DEBUG   iga.epic_steps.inland_marine Sched #18: amount verified OK
+14:28:12.329 DEBUG   iga.epic_steps.inland_marine Sched #18: row complete; expected_next=20
+14:28:12.330 INFO    iga.epic_steps.inland_marine --- Row 19/48: desired item#=20, EPIC auto-fill will be 20, KOMATSU | WA320-7 | - | Wheel Loader | $98233
+14:28:12.334 DEBUG   iga.epic_steps.inland_marine Sched #19: rows_before=17
+14:28:15.594 WARNING iga.epic_steps.page_health wait_for(sched row 19 appeared) timed out after 3000 ms
+14:28:15.594 WARNING iga.epic_steps.inland_marine Sched #19: row count did not grow after Add (consecutive failures: 1/3)
+14:28:15.594 INFO    iga.epic_steps.inland_marine --- Row 20/48: desired item#=21, EPIC auto-fill will be 20, KOMATSU | D61PXI-24 | - | Crawler Dozer | $348000
+14:28:15.598 DEBUG   iga.epic_steps.inland_marine Sched #20: rows_before=18
+14:28:19.046 WARNING iga.epic_steps.page_health wait_for(sched row 20 appeared) timed out after 3000 ms
+14:28:19.046 WARNING iga.epic_steps.inland_marine Sched #20: row count did not grow after Add (consecutive failures: 2/3)
+14:28:19.047 INFO    iga.epic_steps.inland_marine --- Row 21/48: desired item#=22, EPIC auto-fill will be 20, VOLVO | A35G | 2014 | Articulated Hauler | $160000
+14:28:19.051 DEBUG   iga.epic_steps.inland_marine Sched #21: rows_before=19
+14:28:22.460 WARNING iga.epic_steps.page_health wait_for(sched row 21 appeared) timed out after 3000 ms
+14:28:22.460 WARNING iga.epic_steps.inland_marine Sched #21: row count did not grow after Add (consecutive failures: 3/3)
+14:28:22.460 ERROR   iga.epic_steps.inland_marine Scheduled Equipment: aborting after 3 consecutive Add failures — EPIC is rejecting new rows. Remaining 27 item(s) not entered.
+14:28:22.460 INFO    iga.epic_steps.inland_marine === Step 3: Unscheduled Equipment ===
+14:28:39.017 ERROR   iga.epic_steps.inland_marine EquipmentFloater.UnscheduledEquipment: CHM-EFUNEQIP did not appear within 15 s — section did not mount, refusing to proceed
+14:28:39.017 ERROR   iga.epic_steps.inland_marine Unscheduled Equipment: nav failed — aborting section
+14:28:39.017 INFO    iga.epic_steps.inland_marine === Step 4: Additional Interests ===
+14:28:42.176 WARNING iga.test_inland_marine CANCEL requested: SIGINT (Ctrl+C) — flushing logs and stopping at next checkpoint
+14:28:55.588 ERROR   iga.epic_steps.inland_marine EquipmentFloater.AdditionalInterest: CHM-EFADDLIN did not appear within 15 s — section did not mount, refusing to proceed
+14:28:55.588 ERROR   iga.epic_steps.inland_marine Additional Interests: nav failed — aborting section
+14:28:55.588 INFO    iga.epic_steps.inland_marine === Step 5: Additional Coverages ===

@@ -33,9 +33,13 @@ __all__ = [
     "ENV_OVERRIDE_API_KEY",
     "SECRET_SERVICE_NAME",
     "SECRET_USERNAME_API_KEY",
+    "SECRET_USERNAME_EPIC_USERCODE",
+    "SECRET_USERNAME_EPIC_PASSWORD",
     "SecretStoreError",
     "delete_anthropic_api_key",
     "get_anthropic_api_key",
+    "get_epic_credentials",
+    "set_epic_credentials",
     "prompt_for_anthropic_api_key_via_console",
     "set_anthropic_api_key",
 ]
@@ -43,6 +47,8 @@ __all__ = [
 # Public constants — Architecture Appendix A. ------------------------------
 SECRET_SERVICE_NAME: str = "IGA Marketing Master"
 SECRET_USERNAME_API_KEY: str = "anthropic_api_key"
+SECRET_USERNAME_EPIC_USERCODE: str = "epic_usercode"
+SECRET_USERNAME_EPIC_PASSWORD: str = "epic_password"
 ENV_OVERRIDE_API_KEY: str = "ANTHROPIC_API_KEY"
 
 _logger = get_logger("secret_store")
@@ -111,6 +117,46 @@ def delete_anthropic_api_key() -> None:
             return
         _logger.error("keyring backend error on delete_password: %s", exc)
         raise SecretStoreError(f"keyring delete failed: {exc}") from exc
+
+
+def get_epic_credentials() -> tuple[str, str] | None:
+    """Return (usercode, password) from the keyring, or None if not stored.
+
+    Credentials are stored under the same Windows Credential Manager service
+    name as the Anthropic API key, keyed by ``epic_usercode`` /
+    ``epic_password``. Returns None when either value is missing so the
+    caller can prompt the operator to run set_epic_credentials first.
+    """
+    try:
+        usercode = keyring.get_password(SECRET_SERVICE_NAME, SECRET_USERNAME_EPIC_USERCODE)
+        password = keyring.get_password(SECRET_SERVICE_NAME, SECRET_USERNAME_EPIC_PASSWORD)
+    except KeyringError as exc:
+        _logger.error("keyring backend error reading EPIC credentials: %s", exc)
+        raise SecretStoreError(f"keyring read failed: {exc}") from exc
+    if usercode and password:
+        _logger.debug("EPIC credentials resolved from keyring")
+        return usercode, password
+    return None
+
+
+def set_epic_credentials(usercode: str, password: str) -> None:
+    """Store EPIC usercode and password in Windows Credential Manager.
+
+    Both values must be non-empty strings. Call this once from a setup
+    utility or the GUI's settings dialog — the persistent Playwright profile
+    should only need it on the very first login.
+    """
+    if not usercode or not usercode.strip():
+        raise ValueError("EPIC usercode must be a non-empty string")
+    if not password or not password.strip():
+        raise ValueError("EPIC password must be a non-empty string")
+    try:
+        keyring.set_password(SECRET_SERVICE_NAME, SECRET_USERNAME_EPIC_USERCODE, usercode)
+        keyring.set_password(SECRET_SERVICE_NAME, SECRET_USERNAME_EPIC_PASSWORD, password)
+    except KeyringError as exc:
+        _logger.error("keyring backend error writing EPIC credentials: %s", exc)
+        raise SecretStoreError(f"keyring write failed: {exc}") from exc
+    _logger.info("EPIC credentials written to keyring (service=%s)", SECRET_SERVICE_NAME)
 
 
 def prompt_for_anthropic_api_key_via_console(

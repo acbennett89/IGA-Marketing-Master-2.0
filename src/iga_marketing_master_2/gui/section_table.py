@@ -63,9 +63,33 @@ __all__ = [
     "SectionTableModel",
     "SectionTableView",
     "confidence_color",
+    "is_audit_exempt_tag",
     "is_low_confidence_row",
     "row_visible_under_filters",
 ]
+
+
+# Tag leaves that should *never* count toward validation and should never
+# be tinted. These are mechanically-assigned identifiers — sequential
+# row numbers, item indices, etc. — that carry no extraction confidence
+# in any meaningful sense, so flagging them just makes the badge lie.
+_AUDIT_EXEMPT_LEAVES: frozenset[str] = frozenset({
+    "item_number", "itemnumber", "item_no", "itemno",
+    "item_num", "itemnum",
+})
+
+
+def is_audit_exempt_tag(tag: str | None) -> bool:
+    """Return True if *tag* should be skipped by every validation check.
+
+    Used by both :func:`count_low_confidence_in_tab` (main_window.py) and
+    the per-cell / singleton tinting paths in ``section_forms.py`` so the
+    badge and the visual highlights agree on what counts.
+    """
+    if not tag:
+        return False
+    last = tag.rsplit(".", 1)[-1].lower()
+    return last in _AUDIT_EXEMPT_LEAVES
 
 
 _logger = get_logger("gui.section_table")

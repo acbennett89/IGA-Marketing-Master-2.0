@@ -1198,7 +1198,7 @@
         "aliases": [
           "account.named_insured.fni_name"
         ],
-        "notes_for_claude": "PRIMARY Named Insured's legal entity name. Emit this as the FIRST item in the `account.named_insured` repeatable group with `account.named_insured.type` = \"primary\". Do NOT emit this as a flat singleton \u00e2\u20ac\u201d it must be a row inside the repeatable so the GUI can render it alongside any DBA/additional named insureds. Match the dec page text exactly (capitalization, punctuation, LLC/Inc suffixes).",
+        "notes_for_claude": "PRIMARY Named Insured's legal entity name. Emit this as the FIRST item in the `account.named_insured` repeatable group with `account.named_insured.type` = \"primary\". Do NOT emit this as a flat singleton â€” it must be a row inside the repeatable so the GUI can render it alongside any DBA/additional named insureds. Match the dec page text exactly (capitalization, punctuation, LLC/Inc suffixes).",
         "domain_tag_status": "verified"
       },
       {
@@ -1915,7 +1915,7 @@
         "maxlength": 20,
         "domain_tag": "location.site_id",
         "aliases": [],
-        "notes_for_claude": "Building label / description / friendly name. Examples: 'Building #1 - Office', 'Main Office Building', 'Shop', 'Open Shed', 'Warehouse A'. DO NOT put the street address here \u00e2\u20ac\u201d that goes in `location.building_description`. If the dec page lists 'Building #1 - Office, 1320 US Hwy 231', split it: 'Building #1 - Office' goes here, '1320 US Hwy 231' goes in `location.building_description`.",
+        "notes_for_claude": "Building label / description / friendly name. Examples: 'Building #1 - Office', 'Main Office Building', 'Shop', 'Open Shed', 'Warehouse A'. DO NOT put the street address here â€” that goes in `location.building_description`. If the dec page lists 'Building #1 - Office, 1320 US Hwy 231', split it: 'Building #1 - Office' goes here, '1320 US Hwy 231' goes in `location.building_description`.",
         "domain_tag_status": "verified"
       },
       {
@@ -1927,7 +1927,7 @@
         "maxlength": 80,
         "domain_tag": "location.building_description",
         "aliases": [],
-        "notes_for_claude": "Street address of the premises ONLY. Examples: '1320 US Highway 231 N, Hartford, KY 42347'. DO NOT include a building name, label, or description in this field \u00e2\u20ac\u201d those go in `location.site_id`. If the dec page lists ONE location with no separate Premises Schedule, copy the named insured's mailing address here. If multiple locations share an address but have different building labels, repeat the address on each row.",
+        "notes_for_claude": "Street address of the premises ONLY. Examples: '1320 US Highway 231 N, Hartford, KY 42347'. DO NOT include a building name, label, or description in this field â€” those go in `location.site_id`. If the dec page lists ONE location with no separate Premises Schedule, copy the named insured's mailing address here. If multiple locations share an address but have different building labels, repeat the address on each row.",
         "domain_tag_status": "verified"
       },
       {
@@ -3419,7 +3419,7 @@
         "aliases": [
           "policy.gl.emp_ben_limit"
         ],
-        "notes_for_claude": "Employee Benefits Liability (EBL) Each Claim Limit. EBL is claims-made coverage \u00e2\u20ac\u201d limits typically shown as Each Claim and Total Aggregate. Most dec pages show ONE number (the Each Claim limit, which often matches the Aggregate). If the page shows TWO values, put the Each Claim value here and emit the aggregate as the SYNTHETIC tag `policy.gl.ebl.aggregate_limit` (it has no EPIC field but our pipeline supports it as a dedicated tag).",
+        "notes_for_claude": "Employee Benefits Liability (EBL) Each Claim Limit. EBL is claims-made coverage â€” limits typically shown as Each Claim and Total Aggregate. Most dec pages show ONE number (the Each Claim limit, which often matches the Aggregate). If the page shows TWO values, put the Each Claim value here and emit the aggregate as the SYNTHETIC tag `policy.gl.ebl.aggregate_limit` (it has no EPIC field but our pipeline supports it as a dedicated tag).",
         "domain_tag_status": "verified"
       },
       {
@@ -4054,7 +4054,7 @@
         "domain_tag": "policy.gl.ebl.retroactive_date",
         "domain_tag_status": "verified",
         "aliases": [],
-        "notes_for_claude": "EBL retroactive date \u00e2\u20ac\u201d claims-made coverage trigger. Format MM/DD/YYYY."
+        "notes_for_claude": "EBL retroactive date â€” claims-made coverage trigger. Format MM/DD/YYYY."
       },
       {
         "type": "date",
@@ -4804,7 +4804,7 @@
         "domain_tag": "policy.gl.additional_coverage.name",
         "domain_tag_status": "verified",
         "aliases": [],
-        "notes_for_claude": "The plain-English coverage name as it appears on the dec page or endorsement schedule. EXAMPLES (not exhaustive \u00e2\u20ac\u201d extract any endorsement-style coverage with its own limits/deductible): 'Employment Practices Liability', 'Hired/Non-Owned Auto', 'Liquor Liability', 'Pollution Liability', 'Cyber Liability', 'Stop Gap', 'Limited Pollution', 'Owners and Contractors Protective', 'Designated Construction Project Aggregate'. DO NOT include Employee Benefits Liability (EBL) here \u00e2\u20ac\u201d EBL has its own dedicated tags under `policy.gl.ebl.*`. Match the dec page text; if abbreviated (e.g., 'EPLI'), expand to the full form."
+        "notes_for_claude": "The plain-English coverage name as it appears on the dec page or endorsement schedule. EXAMPLES (not exhaustive â€” extract any endorsement-style coverage with its own limits/deductible): 'Employment Practices Liability', 'Hired/Non-Owned Auto', 'Liquor Liability', 'Pollution Liability', 'Cyber Liability', 'Stop Gap', 'Limited Pollution', 'Owners and Contractors Protective', 'Designated Construction Project Aggregate'. DO NOT include Employee Benefits Liability (EBL) here â€” EBL has its own dedicated tags under `policy.gl.ebl.*`. Match the dec page text; if abbreviated (e.g., 'EPLI'), expand to the full form."
       },
       {
         "type": "text",
@@ -5094,7 +5094,7 @@
         "domain_tag": "policy.gl.additional_coverage.retroactive_date",
         "domain_tag_status": "verified",
         "aliases": [],
-        "notes_for_claude": "Retroactive Date for claims-made endorsements (e.g., EPLI, EBL). Only present on claims-made coverages \u00e2\u20ac\u201d leave omitted for occurrence."
+        "notes_for_claude": "Retroactive Date for claims-made endorsements (e.g., EPLI, EBL). Only present on claims-made coverages â€” leave omitted for occurrence."
       },
       {
         "type": "date",
@@ -8927,8 +8927,21 @@
         "maxlength": 30,
         "domain_tag": "policy.inland_marine.unscheduled_item.description",
         "aliases": [],
-        "notes_for_claude": null,
+        "notes_for_claude": "Extract the full Unscheduled coverage description verbatim from the source document. Do NOT truncate or abbreviate here — the full text is preserved for operator review. The 30-character form that actually gets typed into EPIC lives in the sibling field description_short.",
         "domain_tag_status": "verified"
+      },
+      {
+        "type": "derived",
+        "label": "Description (EPIC short form)",
+        "name": "streDescription",
+        "required": false,
+        "format": "new",
+        "disabled": true,
+        "maxlength": 30,
+        "domain_tag": "policy.inland_marine.unscheduled_item.description_short",
+        "aliases": [],
+        "notes_for_claude": "DERIVED FIELD — not extracted from the document. Generate from the sibling description value: if description is 30 characters or fewer, copy it verbatim. If longer, abbreviate to AT MOST 30 characters using standard insurance shorthand (BPP=Business Personal Property, RC=Replacement Cost, ACV=Actual Cash Value, BI=Bodily Injury, PD=Property Damage, EE=Employees, Equip=Equipment, Bldg=Building, Prop=Property, Comm=Commercial, Comp=Comprehensive, Liab=Liability). Preserve the core meaning. EPIC's column caps at 30 chars and rejects anything longer.",
+        "domain_tag_status": "derived"
       },
       {
         "type": "text",
@@ -9041,7 +9054,7 @@
         "maxlength": 40,
         "domain_tag": "policy.inland_marine.scheduled_item.description",
         "aliases": [],
-        "notes_for_claude": "The equipment description only \u2014 do NOT repeat the model year, manufacturer, or model number here (those go in the separate model_year, manufacturer, and model fields). Example: for \"2010 John Deere Mini Compact Excavator Model 50D\", emit \"Mini Compact Excavator\".",
+        "notes_for_claude": "The equipment description only — do NOT repeat the model year, manufacturer, or model number here (those go in the separate model_year, manufacturer, and model fields). Example: for \"2010 John Deere Mini Compact Excavator Model 50D\", emit \"Mini Compact Excavator\".",
         "domain_tag_status": "verified"
       },
       {
@@ -9140,7 +9153,7 @@
         "disabled": true,
         "domain_tag": "policy.inland_marine.scheduled_item.deductible",
         "aliases": [],
-        "notes_for_claude": "Per-item deductible amount for this scheduled item. Strip currency symbols and commas (e.g. '1000' not '$1,000'). Emit 'None' if explicitly shown as none. Leave empty if not shown per item \u00e2\u20ac\u201d do not infer from a blanket policy deductible.",
+        "notes_for_claude": "Per-item deductible amount for this scheduled item. Strip currency symbols and commas (e.g. '1000' not '$1,000'). Emit 'None' if explicitly shown as none. Leave empty if not shown per item â€” do not infer from a blanket policy deductible.",
         "domain_tag_status": "verified"
       },
       {
@@ -10359,7 +10372,7 @@
         "format": "new",
         "domain_tag": "policy.auto.liability.symbols",
         "aliases": [],
-        "notes_for_claude": "Comma-separated string of ACORD 127 covered-auto symbols that apply to this coverage line.\n\nACORD 127 covered-auto symbols define which auto types a coverage applies to. Standard symbols:\n  1  - Any Auto\n  2  - Owned Autos Only\n  3  - Owned Private Passenger Autos Only\n  4  - Owned Autos Other Than Private Passenger Autos Only\n  5  - Owned Autos Subject to No-Fault\n  6  - Owned Autos Subject to a Compulsory Uninsured Motorists Law\n  7  - Specifically Described Autos\n  8  - Hired Autos Only\n  9  - Non-Owned Autos Only\n  19 - Mobile Equipment Subject to Compulsory or Financial Responsibility or Other Motor Vehicle Insurance Law\n\nState-specific notes:\n  - Most states (TN, KY, OH, etc.): Liability typically uses 1, 7, 8, 9. UM uses 2, 7. Comp/Coll typically use 7 (specifically described).\n  - No-fault states (FL, MI, NJ, NY, PA, MA, MN, ND, KS, KY-optional, UT, HI): PIP/No-Fault coverage uses Symbol 5.\n  - Some states require Symbol 6 (Compulsory UM Law) instead of 2 for Uninsured Motorists \u00e2\u20ac\u201d read the dec page header carefully.\n  - Mobile equipment (cranes, backhoes, forklifts on public roads): Symbol 19.\n\nFor this specific coverage: On the dec page, look for the 'Liability' or 'BI/PD Liability' row. Symbols typically shown as numbers in a 'Sym(s)' column or check-marks under columns labeled 1-9. For most commercial auto policies, the answer is '1, 7, 8, 9' (Any Auto + Specifically Described + Hired + Non-Owned). Output as a comma-separated string.\n\nFORMAT: comma-separated digits, e.g., '1, 7, 8, 9' or '7'. Do NOT emit the symbol descriptions \u00e2\u20ac\u201d just the numbers.",
+        "notes_for_claude": "Comma-separated string of ACORD 127 covered-auto symbols that apply to this coverage line.\n\nACORD 127 covered-auto symbols define which auto types a coverage applies to. Standard symbols:\n  1  - Any Auto\n  2  - Owned Autos Only\n  3  - Owned Private Passenger Autos Only\n  4  - Owned Autos Other Than Private Passenger Autos Only\n  5  - Owned Autos Subject to No-Fault\n  6  - Owned Autos Subject to a Compulsory Uninsured Motorists Law\n  7  - Specifically Described Autos\n  8  - Hired Autos Only\n  9  - Non-Owned Autos Only\n  19 - Mobile Equipment Subject to Compulsory or Financial Responsibility or Other Motor Vehicle Insurance Law\n\nState-specific notes:\n  - Most states (TN, KY, OH, etc.): Liability typically uses 1, 7, 8, 9. UM uses 2, 7. Comp/Coll typically use 7 (specifically described).\n  - No-fault states (FL, MI, NJ, NY, PA, MA, MN, ND, KS, KY-optional, UT, HI): PIP/No-Fault coverage uses Symbol 5.\n  - Some states require Symbol 6 (Compulsory UM Law) instead of 2 for Uninsured Motorists â€” read the dec page header carefully.\n  - Mobile equipment (cranes, backhoes, forklifts on public roads): Symbol 19.\n\nFor this specific coverage: On the dec page, look for the 'Liability' or 'BI/PD Liability' row. Symbols typically shown as numbers in a 'Sym(s)' column or check-marks under columns labeled 1-9. For most commercial auto policies, the answer is '1, 7, 8, 9' (Any Auto + Specifically Described + Hired + Non-Owned). Output as a comma-separated string.\n\nFORMAT: comma-separated digits, e.g., '1, 7, 8, 9' or '7'. Do NOT emit the symbol descriptions â€” just the numbers.",
         "domain_tag_status": "verified"
       },
       {
@@ -10436,7 +10449,7 @@
         "format": "new",
         "domain_tag": "policy.auto.medical.symbols",
         "aliases": [],
-        "notes_for_claude": "Comma-separated string of ACORD 127 covered-auto symbols for this coverage. See policy.auto.liability.symbols for the full symbol glossary and state-specific guidance.\n\nFor this specific coverage: Medical Payments row. Common values: '2, 7' (Owned + Specifically Described) or '2, 3, 4, 7' (varies by carrier/state). NOT applicable in PIP/no-fault states for personal-injury equivalents \u00e2\u20ac\u201d those use no_fault.symbols=Symbol 5 instead.\n\nFORMAT: comma-separated digits, e.g., '2, 7' or '7'.",
+        "notes_for_claude": "Comma-separated string of ACORD 127 covered-auto symbols for this coverage. See policy.auto.liability.symbols for the full symbol glossary and state-specific guidance.\n\nFor this specific coverage: Medical Payments row. Common values: '2, 7' (Owned + Specifically Described) or '2, 3, 4, 7' (varies by carrier/state). NOT applicable in PIP/no-fault states for personal-injury equivalents â€” those use no_fault.symbols=Symbol 5 instead.\n\nFORMAT: comma-separated digits, e.g., '2, 7' or '7'.",
         "domain_tag_status": "verified"
       },
       {
@@ -10491,7 +10504,7 @@
         "format": "new",
         "domain_tag": "policy.auto.uninsured.symbols",
         "aliases": [],
-        "notes_for_claude": "Comma-separated string of ACORD 127 covered-auto symbols for this coverage. See policy.auto.liability.symbols for the full symbol glossary and state-specific guidance.\n\nFor this specific coverage: Uninsured/Underinsured Motorist row. Common values: '2, 7' or '6, 7' depending on whether the state mandates Compulsory UM (Symbol 6) vs voluntary owned-autos UM (Symbol 2). Read the dec page label \u00e2\u20ac\u201d 'Uninsured Motorists - Owned' = 2; 'Uninsured Motorists Compulsory' = 6.\n\nFORMAT: comma-separated digits, e.g., '2, 7' or '7'.",
+        "notes_for_claude": "Comma-separated string of ACORD 127 covered-auto symbols for this coverage. See policy.auto.liability.symbols for the full symbol glossary and state-specific guidance.\n\nFor this specific coverage: Uninsured/Underinsured Motorist row. Common values: '2, 7' or '6, 7' depending on whether the state mandates Compulsory UM (Symbol 6) vs voluntary owned-autos UM (Symbol 2). Read the dec page label â€” 'Uninsured Motorists - Owned' = 2; 'Uninsured Motorists Compulsory' = 6.\n\nFORMAT: comma-separated digits, e.g., '2, 7' or '7'.",
         "domain_tag_status": "verified"
       },
       {
@@ -10623,7 +10636,7 @@
         "format": "new",
         "domain_tag": "policy.auto.specified_causes_loss.symbols",
         "aliases": [],
-        "notes_for_claude": "Comma-separated string of ACORD 127 covered-auto symbols for this coverage. See policy.auto.liability.symbols for the full symbol glossary and state-specific guidance.\n\nFor this specific coverage: Specified Causes of Loss row (a cheaper alternative to Comprehensive). Almost always Symbol 7. Mutually exclusive with Comprehensive on the same vehicle \u00e2\u20ac\u201d extract whichever appears.\n\nFORMAT: comma-separated digits, e.g., '2, 7' or '7'.",
+        "notes_for_claude": "Comma-separated string of ACORD 127 covered-auto symbols for this coverage. See policy.auto.liability.symbols for the full symbol glossary and state-specific guidance.\n\nFor this specific coverage: Specified Causes of Loss row (a cheaper alternative to Comprehensive). Almost always Symbol 7. Mutually exclusive with Comprehensive on the same vehicle â€” extract whichever appears.\n\nFORMAT: comma-separated digits, e.g., '2, 7' or '7'.",
         "domain_tag_status": "verified"
       },
       {
@@ -19304,6 +19317,345 @@
       }
     ],
     "fields": [],
+    "tabs": []
+  },
+  "Master Marketing Submission > Create": {
+    "level": 3,
+    "label": "Master Marketing Submission - Create (MKADMSTR)",
+    "screen_code": "MKADMSTR",
+    "acord_form": null,
+    "automation_id": null,
+    "notes": "Reached via Policies > Add a Master Marketing Submission. All header fields must be filled before saving. cboStatus is DISABLED (auto-managed by EPIC) - skip it. cboTypeOfBusiness lives in the Policies to Market sub-section and requires the nativeInputSetter trick: set HTMLInputElement.prototype.value via Object.getOwnPropertyDescriptor setter, fire input event, then click row. Fill pattern for all other combos: click .drop-btn to open, then click the matching [data-automation-id='<fieldId> body-row item-N'] row. After header is filled, add policy lines via the Add icon-button (title=Add inside fraExistingPolicies), which opens MMKADNEW dialog. Click Finish to save the entire MMS.",
+    "buttons": [
+      {
+        "label": "Cancel",
+        "selector": "button.button.cancel",
+        "format": "button"
+      },
+      {
+        "label": "Finish",
+        "selector": "button.button",
+        "format": "button"
+      },
+      {
+        "label": "Detail",
+        "selector": "button.button.accept",
+        "format": "button"
+      },
+      {
+        "label": "Add line",
+        "container": "fraExistingPolicies",
+        "selector": ".icon-button[title='Add']",
+        "format": "icon-button",
+        "notes": "Opens Add Line picker (Add new / Add existing), then MMKADNEW dialog."
+      }
+    ],
+    "fields": [
+      {
+        "type": "text",
+        "label": "Name",
+        "name": "streName",
+        "required": true,
+        "format": "new",
+        "hint": "text",
+        "domain_tag": "submission.mms_name",
+        "aliases": [],
+        "notes_for_claude": "Convention: \"YYYY New Business MMS - <Client Name>\"",
+        "domain_tag_status": "verified"
+      },
+      {
+        "type": "date",
+        "label": "Effective",
+        "name": "dteEffective",
+        "required": false,
+        "format": "new",
+        "hint": "date",
+        "domain_tag": "submission.effective_date",
+        "aliases": [],
+        "notes_for_claude": null,
+        "domain_tag_status": "verified"
+      },
+      {
+        "type": "date",
+        "label": "Expiration",
+        "name": "dteExpiration",
+        "required": false,
+        "format": "new",
+        "hint": "date",
+        "domain_tag": "submission.expiration_date",
+        "aliases": [],
+        "notes_for_claude": null,
+        "domain_tag_status": "verified"
+      },
+      {
+        "type": "select",
+        "label": "Source",
+        "name": "cboSource",
+        "required": false,
+        "format": "new",
+        "hint": "combo",
+        "domain_tag": null,
+        "aliases": [],
+        "notes_for_claude": "Optional. Leave blank for new submissions.",
+        "domain_tag_status": "out_of_scope"
+      },
+      {
+        "type": "select",
+        "label": "Agency",
+        "name": "cboAgency",
+        "required": true,
+        "format": "new",
+        "hint": "combo",
+        "domain_tag": "submission.agency",
+        "aliases": [],
+        "notes_for_claude": "Pre-filled from client record. Verify matches submission.agency.",
+        "domain_tag_status": "verified",
+        "enum_values": [
+          "IEB",
+          "IGA",
+          "VA"
+        ]
+      },
+      {
+        "type": "select",
+        "label": "Branch",
+        "name": "cboBranch",
+        "required": true,
+        "format": "new",
+        "hint": "combo",
+        "domain_tag": "submission.branch",
+        "aliases": [],
+        "notes_for_claude": "002 = Franklin TN (IGA default). Shown truncated as 'Frank' in UI.",
+        "domain_tag_status": "verified",
+        "enum_values": [
+          "001",
+          "002",
+          "003"
+        ]
+      },
+      {
+        "type": "select",
+        "label": "Department",
+        "name": "cboDepartment",
+        "required": true,
+        "format": "new",
+        "hint": "combo",
+        "domain_tag": "submission.department",
+        "aliases": [],
+        "notes_for_claude": "Always 'CL' (Commercial Lines) for IGA commercial submissions.",
+        "domain_tag_status": "verified",
+        "enum_values": [
+          "BEN",
+          "CL",
+          "LIF",
+          "PL",
+          "REC",
+          "RM",
+          "SUR"
+        ]
+      },
+      {
+        "type": "select",
+        "label": "Profit center",
+        "name": "cboProfitCenter",
+        "required": true,
+        "format": "new",
+        "hint": "combo",
+        "domain_tag": "submission.profit_center",
+        "aliases": [],
+        "notes_for_claude": "Always 'MM' (Middle Market) for IGA.",
+        "domain_tag_status": "verified",
+        "enum_values": [
+          "MM"
+        ]
+      },
+      {
+        "type": "select",
+        "label": "Status",
+        "name": "cboStatus",
+        "required": false,
+        "format": "new",
+        "hint": "combo",
+        "domain_tag": null,
+        "aliases": [],
+        "notes_for_claude": "DISABLED - auto-managed by EPIC. Do not attempt to fill.",
+        "domain_tag_status": "out_of_scope"
+      },
+      {
+        "type": "select",
+        "label": "Type of business",
+        "name": "cboTypeOfBusiness",
+        "required": true,
+        "format": "new",
+        "hint": "combo",
+        "domain_tag": "submission.type_of_business",
+        "aliases": [],
+        "notes_for_claude": "In the Policies to Market sub-section of MKADMSTR. Always 'Commercial Lines' for IGA. FILL PATTERN: nativeInputSetter required - Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(input, value), fire input Event, then click body-row.",
+        "domain_tag_status": "verified",
+        "enum_values": [
+          "Agriculture Lines",
+          "Benefits",
+          "Bond",
+          "Commercial Lines",
+          "Financial Services",
+          "Life & Health",
+          "Other",
+          "Personal Lines"
+        ]
+      }
+    ],
+    "tabs": []
+  },
+  "Master Marketing Submission > Add New Line": {
+    "level": 4,
+    "label": "Add New Line dialog (MMKADNEW)",
+    "screen_code": "MMKADNEW",
+    "acord_form": null,
+    "automation_id": null,
+    "notes": "Modal dialog opened from MKADMSTR Add line button. First an intermediate 'Add Line' picker appears with 'Add new line' / 'Add existing line' radio buttons and a Continue button - always pick new. All four main fields are required (red border). For cboLine: type the LOB code into the input to filter, then click matching row. After filling all fields: click Add to add another line (resets form), or Finish to close dialog and return to MKADMSTR. The outer MKADMSTR form still needs its own Finish clicked to save the MMS. Validation errors dismiss via button[data-automation-id='OK'].",
+    "buttons": [
+      {
+        "label": "Add",
+        "selector": "button",
+        "format": "button",
+        "notes": "Saves line, resets form for another line."
+      },
+      {
+        "label": "Finish",
+        "selector": "button",
+        "format": "button",
+        "notes": "Saves line and closes dialog. Use for the last line."
+      },
+      {
+        "label": "Cancel",
+        "selector": "button",
+        "format": "button"
+      }
+    ],
+    "fields": [
+      {
+        "type": "select",
+        "label": "Line",
+        "name": "cboLine",
+        "required": true,
+        "format": "new",
+        "hint": "combo",
+        "domain_tag": "submission.line_of_business",
+        "aliases": [],
+        "notes_for_claude": "LOB code. Type-to-filter: set input.value to code, fire input event, click matching body-row. Common IGA codes: GLIA=General Liability, BAUT=Business Auto, PROP=Property, PROF=Professional Liability, WCOM=Workers Compensation, TRUC=Truckers, BOP=Business Owners Policy, CUMB=Commercial Umbrella, IM=Inland Marine Commercial, EPLI=Employment Practices Liability.",
+        "domain_tag_status": "verified",
+        "enum_values": [
+          "ACCD",
+          "ARVP",
+          "BAUT",
+          "BOIL",
+          "BOP",
+          "BRSK",
+          "BRSO",
+          "CFLD",
+          "CONL",
+          "CONP",
+          "CRDT",
+          "CRIM",
+          "CUMB",
+          "CYB",
+          "CYB2",
+          "D&O",
+          "E&O",
+          "EDP",
+          "EPLI",
+          "EQFL",
+          "EXCS",
+          "FIDU",
+          "FORG",
+          "GARD",
+          "GLAS",
+          "GLIA",
+          "IM",
+          "INST",
+          "LIQU",
+          "MGTL",
+          "MTC",
+          "NLIU",
+          "OCMA",
+          "OCP",
+          "PLPR",
+          "POLL",
+          "PROF",
+          "PROP",
+          "RRPL",
+          "SPEC",
+          "SPEV",
+          "TRAN",
+          "TRUC",
+          "WCOM"
+        ]
+      },
+      {
+        "type": "select",
+        "label": "Profit center",
+        "name": "cboProfitCenter",
+        "required": true,
+        "format": "new",
+        "hint": "combo",
+        "domain_tag": "submission.profit_center",
+        "aliases": [],
+        "notes_for_claude": "Same list as MKADMSTR. Always 'MM' for IGA.",
+        "domain_tag_status": "verified",
+        "enum_values": [
+          "MM"
+        ]
+      },
+      {
+        "type": "select",
+        "label": "Line status",
+        "name": "cboLineStatus",
+        "required": true,
+        "format": "new",
+        "hint": "combo",
+        "domain_tag": null,
+        "aliases": [],
+        "notes_for_claude": "AOR=First Year AOR, CAN=Cancelled-Insured Request, CLC=Cancelled-Underwriting Issues, CNA=Cancelled-Audit Non-Compliance, CNP=Cancelled-Non Payment, CNR=Carrier Non-Renewal, CRP=Cancelled-Failure to Report Exposure, DNR=Do Not Renew, ERR=Error, MAA=Moved to Another Agency, MAR=Moved to New Carrier. For NEW business use AOR (First Year AOR) - CONFIRM WITH ANDREW.",
+        "domain_tag_status": "out_of_scope",
+        "enum_values": [
+          "AOR",
+          "CAN",
+          "CLC",
+          "CNA",
+          "CNP",
+          "CNR",
+          "CRP",
+          "DNR",
+          "ERR",
+          "MAA",
+          "MAR"
+        ]
+      },
+      {
+        "type": "select",
+        "label": "Issuing location",
+        "name": "cboIssuingLocation",
+        "required": true,
+        "format": "new",
+        "hint": "combo",
+        "domain_tag": "submission.issuing_state",
+        "aliases": [],
+        "notes_for_claude": "US/Canadian state or province code (TN=Tennessee, etc.). Source: client address state from state.json.",
+        "domain_tag_status": "pending"
+      },
+      {
+        "type": "select",
+        "label": "Prefill",
+        "name": "cboPrefill",
+        "required": false,
+        "format": "new",
+        "hint": "combo",
+        "domain_tag": null,
+        "aliases": [],
+        "notes_for_claude": "Optional. Leave blank unless reusing a prior policy template.",
+        "domain_tag_status": "out_of_scope"
+      }
+    ],
     "tabs": []
   }
 }

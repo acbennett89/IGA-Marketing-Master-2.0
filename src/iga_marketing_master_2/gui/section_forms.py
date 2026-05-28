@@ -4,17 +4,20 @@ from __future__ import annotations
 from PySide6.QtCore import QEvent, QObject, Qt, Signal
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
+    QApplication,
     QCheckBox,
     QComboBox,
     QFrame,
     QGridLayout,
     QHBoxLayout,
     QHeaderView,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QListWidget,
     QListWidgetItem,
     QMenu,
+    QMessageBox,
     QPlainTextEdit,
     QPushButton,
     QScrollArea,
@@ -25,7 +28,7 @@ from PySide6.QtWidgets import (
 )
 
 from . import section_forms_layout as layout
-from .section_table import confidence_color
+from .section_table import confidence_color, is_audit_exempt_tag
 
 __all__ = ["SectionFormBase", "make_section_form", "invalidate_field_map_cache"]
 
@@ -33,6 +36,235 @@ __all__ = ["SectionFormBase", "make_section_form", "invalidate_field_map_cache"]
 # Default minimum height for repeatable tables — sized to show ~6 rows
 # before scrolling kicks in. Header (~28px) + 6 rows × ~28px ≈ 200px.
 _TBL_HEIGHT_6_ROWS: int = 200
+
+
+# ---------------------------------------------------------------------------
+# Currency display formatting
+# ---------------------------------------------------------------------------
+# All IM currency columns (limits, deductibles, premiums, etc.) display
+# in a single canonical format: ``$X,XX0``. The underlying state.json
+# value can be anything ("5000", "5,000", "$5,000" — extraction varies),
+# and EPIC entry strips back to bare digits via norm_currency / Strip
+# currency in the step files. Display formatting is GUI-only and
+# non-destructive — we do not write back the formatted form.
+
+
+def _fmt_currency_display(raw: str) -> str:
+    """Return *raw* formatted as ``$X,XX0`` (or ``$X,XX0.YY`` if non-integer).
+
+    Empty / blank stays empty. Values that don't parse as numeric pass
+    through unchanged so we don't mangle text the operator may have
+    intentionally typed (e.g., free-text notes mixed into the column).
+    """
+    import re as _re_cur
+    if raw is None:
+        return ""
+    s = str(raw).strip()
+    if not s:
+        return ""
+    digits = _re_cur.sub(r"[^\d.]", "", s)
+    if not digits:
+        return s
+    try:
+        v = float(digits)
+    except ValueError:
+        return s
+    if v == int(v):
+        return f"${int(v):,}"
+    return f"${v:,.2f}"
+
+
+# ---------------------------------------------------------------------------
+# Currency tag detection
+# ---------------------------------------------------------------------------
+# Whether a domain_tag represents a dollar value. We use lowercased keyword
+# patterns against the *tag* itself (which mirrors EPIC's terse field names —
+# streLimit, cureDeductible, streAmtInsurance, strePayroll, etc.). Phone /
+# fax / extension / count / number / year / age / mod fields are excluded
+# explicitly so digits-only non-currency values pass through untouched.
+
+_CURRENCY_KEYWORDS = (
+    "limit", "ded", "amt", "amount", "premium", "aggr", "aggregate",
+    "payroll", "exposure", "salary", "revenue", "sales", "occ",
+    "med", "claim", "retro", "retained", "sir",
+    "cure",  # cure* tags are always currency in EPIC (cureLimit / curePremium)
+)
+_CURRENCY_NEGATIVE = (
+    "phone", "fax", "ext", "count", "num", "number", "year", "age", "mod",
+    "code", "zip", "fein", "vin", "naics", "sic", "rate", "pct", "percent",
+    "id", "uuid", "date", "ref", "loc", "bldg", "site",
+    "name", "addr", "street", "city", "state", "country",
+)
+
+
+def _is_currency_tag(tag: str | None) -> bool:
+    """Heuristic: does this domain_tag represent a dollar amount?
+
+    Examples that return True::
+
+        streLimit, streEachOccLimit, streGenAggrAppLimit, cureDeductible,
+        streAmtInsurance, strePayroll, streDamPremLimit, streBIDed.
+
+    Examples that return False::
+
+        synthetic_LocationNumber, inteBuildingNumber, strePhone, streZip,
+        streFEIN, cboBasis, cboNameType, streStreetLine.
+
+    Empty/None returns False so an unresolved column isn't formatted.
+    """
+    if not tag:
+        return False
+    last = tag.rsplit(".", 1)[-1].lower()
+    if any(kw in last for kw in _CURRENCY_NEGATIVE):
+        return False
+    return any(kw in last for kw in _CURRENCY_KEYWORDS)
+
+
+def _reformat_currency_cells(
+    table: QTableWidget, columns: list[int],
+) -> None:
+    """Walk every row of *table* and rewrite the listed currency columns
+    to the canonical ``$X,XX0`` display form. Blocks ``cellChanged``
+    while writing so the persistence path doesn't fire on programmatic
+    edits."""
+    prev_block = getattr(table, "_iga_block", False)
+    table._iga_block = True
+    try:
+        for r in range(table.rowCount()):
+            for c in columns:
+                cell = table.item(r, c)
+                if cell is None:
+                    continue
+                fmtd = _fmt_currency_display(cell.text())
+                if fmtd != cell.text():
+                    cell.setText(fmtd)
+    finally:
+        table._iga_block = prev_block
+
+
+# ---------------------------------------------------------------------------
+# Cross-section row moves (Inland Marine)
+# ---------------------------------------------------------------------------
+# Operators frequently realize an item was extracted into the wrong IM
+# subsection — e.g., a discrete piece of equipment landed under Additional
+# Coverages, or vice versa. The right-click "Move to..." menu walks the
+# selected rows through a per-pair field map. Where the destination has
+# fewer fields than the source, the extra source fields concat into the
+# destination's description-like field. If the result exceeds EPIC's
+# 30-char Unscheduled cap, the operator gets a prompt to shorten it
+# manually (no Claude here — moves should be deterministic).
+
+_IM_SCHED_GROUP    = "policy.inland_marine.scheduled_item"
+_IM_UNSCHED_GROUP  = "policy.inland_marine.unscheduled_item"
+_IM_AC_GROUP       = "policy.inland_marine.additional_coverage"
+
+# EPIC caps the Unscheduled description column at 30 chars. The Scheduled
+# description and AC name fields have no hard cap we hit in practice.
+_UNSCHED_DESC_MAX  = 30
+
+
+def _val_of(item: dict, tag: str) -> str:
+    """Extract the string value from a state record (or '' if missing)."""
+    rec = item.get(tag)
+    return str(rec.get("value") or "").strip() if isinstance(rec, dict) else ""
+
+
+def _rec_of(value: str) -> dict | None:
+    """Wrap a value in a state record dict; returns None for empty.
+
+    Marks the record as ``status="approved"`` so the GUI's
+    :func:`confidence_color` treats it as operator-confirmed (no red
+    "low confidence" tint). The operator explicitly moved this value
+    via the right-click "Move to..." action — that's an approval.
+    """
+    v = (value or "").strip()
+    if not v:
+        return None
+    return {"value": v, "status": "approved", "confidence": 1.0}
+
+
+def _concat_nonblank(*parts: str) -> str:
+    """Space-join the truthy, non-whitespace parts."""
+    return " ".join(p.strip() for p in parts if p and p.strip())
+
+
+def transform_im_row(item: dict, src_group: str, dest_group: str) -> dict:
+    """Build a destination-shaped row from a single source IM row.
+
+    Returns a dict of ``{tag: record_or_None}`` keyed by destination tags.
+    Caller drops None values before inserting into ``state.repeatables``.
+    Unknown (src, dest) pairs return an empty dict.
+    """
+    g = lambda tag: _val_of(item, f"{src_group}.{tag}")
+
+    if src_group == _IM_SCHED_GROUP and dest_group == _IM_UNSCHED_GROUP:
+        # Concat year/make/model/desc so the Unsched row identifies the item.
+        desc = _concat_nonblank(
+            g("model_year"), g("manufacturer"), g("model"), g("description"),
+        )
+        return {
+            f"{dest_group}.description":   _rec_of(desc),
+            f"{dest_group}.amt_insurance": _rec_of(g("amt_insurance")),
+        }
+    if src_group == _IM_SCHED_GROUP and dest_group == _IM_AC_GROUP:
+        name = _concat_nonblank(
+            g("model_year"), g("manufacturer"), g("model"), g("description"),
+        )
+        return {
+            f"{dest_group}.name":             _rec_of(name),
+            f"{dest_group}.each_claim_limit": _rec_of(g("amt_insurance")),
+            f"{dest_group}.deductible":       _rec_of(g("deductible")),
+        }
+    if src_group == _IM_UNSCHED_GROUP and dest_group == _IM_SCHED_GROUP:
+        return {
+            f"{dest_group}.description":   _rec_of(g("description")),
+            f"{dest_group}.amt_insurance": _rec_of(g("amt_insurance")),
+        }
+    if src_group == _IM_UNSCHED_GROUP and dest_group == _IM_AC_GROUP:
+        return {
+            f"{dest_group}.name":             _rec_of(g("description")),
+            f"{dest_group}.each_claim_limit": _rec_of(g("amt_insurance")),
+        }
+    if src_group == _IM_AC_GROUP and dest_group == _IM_SCHED_GROUP:
+        return {
+            f"{dest_group}.description":   _rec_of(g("name")),
+            f"{dest_group}.amt_insurance": _rec_of(g("each_claim_limit")),
+            f"{dest_group}.deductible":    _rec_of(g("deductible")),
+        }
+    if src_group == _IM_AC_GROUP and dest_group == _IM_UNSCHED_GROUP:
+        return {
+            f"{dest_group}.description":   _rec_of(g("name")),
+            f"{dest_group}.amt_insurance": _rec_of(g("each_claim_limit")),
+        }
+    return {}
+
+
+def _prompt_shorten(parent: QWidget, proposed: str, max_chars: int,
+                    label_prefix: str) -> str | None:
+    """Modal dialog: ask the operator to shorten *proposed* to ≤ *max_chars*.
+
+    Returns the trimmed text on OK, or ``None`` if the user cancelled.
+    Re-prompts until the result fits or the user cancels.
+    """
+    current = proposed
+    while True:
+        text, ok = QInputDialog.getText(
+            parent,
+            "Description too long",
+            (
+                f"{label_prefix}: this description is {len(current)} characters, "
+                f"but the destination caps it at {max_chars}.\n\n"
+                "Edit it to fit:"
+            ),
+            QLineEdit.Normal,
+            current,
+        )
+        if not ok:
+            return None
+        trimmed = text.strip()
+        if 0 < len(trimmed) <= max_chars:
+            return trimmed
+        current = trimmed
 
 
 # ---------------------------------------------------------------------------
@@ -266,6 +498,104 @@ def _val(state: dict | None, tag: str) -> str:
     return str(v) if v is not None else ""
 
 
+def _record(state: dict | None, tag: str) -> dict | None:
+    """Return the raw FieldRecord dict for *tag*, or ``None`` if absent."""
+    if not state:
+        return None
+    rec = (state.get("fields") or {}).get(tag)
+    return rec if isinstance(rec, dict) else None
+
+
+# Reuse the same threshold used by ``count_low_confidence_in_tab`` so the
+# badge and the singleton-input tinting can never get out of sync.
+from .section_table import CONFIDENCE_HIGH_THRESHOLD as _CONF_HIGH
+
+
+def _checkbox_attention_style(rec: dict | None) -> str:
+    """Return a QSS snippet to flag a QCheckBox that still needs attention.
+
+    Same trigger as :func:`_input_attention_style` (conflict or
+    sub-threshold confidence with non-approved status), but the QSS targets
+    the checkbox body + indicator rather than a QLineEdit border.
+    """
+    if not isinstance(rec, dict):
+        return ""
+    status = rec.get("status", "pending")
+    if status in {"approved", "locked"}:
+        return ""
+    if rec.get("conflicts"):
+        return (
+            "QCheckBox { background: #fff7ed; border-radius: 3px;"
+            " padding: 2px 4px; }"
+            "QCheckBox::indicator { border: 1.5px solid #f97316; }"
+        )
+    try:
+        conf = float(rec.get("confidence", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        conf = 0.0
+    if conf < _CONF_HIGH:
+        return (
+            "QCheckBox { background: #fffbeb; border-radius: 3px;"
+            " padding: 2px 4px; }"
+            "QCheckBox::indicator { border: 1.5px solid #f59e0b; }"
+        )
+    return ""
+
+
+def _attention_tooltip(rec: dict | None) -> str:
+    """Operator-facing tooltip describing why a widget is flagged."""
+    if not isinstance(rec, dict):
+        return ""
+    cfls = rec.get("conflicts") or []
+    if cfls:
+        lines = [
+            f"• {cf.get('value')!r}  "
+            f"(from {(cf.get('source') or {}).get('doc_id', '?')})"
+            for cf in cfls if isinstance(cf, dict)
+        ]
+        return "Conflict — also extracted:\n" + "\n".join(lines)
+    try:
+        conf = float(rec.get("confidence", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        conf = 0.0
+    return f"Low confidence: {conf:.0%}"
+
+
+def _input_attention_style(rec: dict | None) -> str:
+    """Return a QSS snippet to set the singleton input's border/background
+    when it needs attention. Empty string when nothing is wrong.
+
+    Two states:
+
+    * ``conflicts`` present → orange border + pale-orange fill (matches the
+      table-cell conflict tint in ``_populate_row``).
+    * ``confidence < CONFIDENCE_HIGH_THRESHOLD`` and status not approved/
+      locked → yellow border + pale-yellow fill (matches ``_TINT_MID``).
+    * status approved/locked or ``confidence >= CONFIDENCE_HIGH_THRESHOLD``
+      → empty string (no special styling).
+    """
+    if not isinstance(rec, dict):
+        return ""
+    status = rec.get("status", "pending")
+    if status in {"approved", "locked"}:
+        return ""
+    if rec.get("conflicts"):
+        return (
+            "QLineEdit#FieldInput { border: 1px solid #f97316;"
+            " background: #fff7ed; }"
+        )
+    try:
+        conf = float(rec.get("confidence", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        conf = 0.0
+    if conf < _CONF_HIGH:
+        return (
+            "QLineEdit#FieldInput { border: 1px solid #f59e0b;"
+            " background: #fffbeb; }"
+        )
+    return ""
+
+
 def _rep(state: dict | None, group: str) -> list[dict]:
     if not state:
         return []
@@ -405,6 +735,69 @@ class SectionFormBase(QScrollArea):
         g.setColumnStretch(cols * 2, 1)
         return g
 
+    def _install_singleton_accept_menu(
+        self,
+        widget: "QLineEdit | QComboBox | QCheckBox",
+        tag: str,
+    ) -> None:
+        """Attach a right-click menu that includes Accept on a singleton field.
+
+        Builds on top of the widget's standard context menu (for QLineEdit
+        we splice the standard Undo/Cut/Copy/etc. menu underneath ours; for
+        QComboBox / QCheckBox there is no standard edit menu so we just
+        show Accept).
+
+        Accept marks the field's record as approved (status=approved,
+        confidence=1.0, conflicts cleared) and drops the visual tint. No-op
+        when the field isn't currently flagged.
+        """
+        widget.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+
+        def on_menu(pos, w=widget, t=tag) -> None:
+            from PySide6.QtWidgets import QMenu as _QMenu
+            rec = _record(self._state, t)
+            flagged = bool(_input_attention_style(rec) or _checkbox_attention_style(rec))
+            # Build a menu starting with Accept (only when flagged), then
+            # append the widget's standard menu if it has one.
+            menu = _QMenu(w)
+            accept_act = None
+            if flagged:
+                accept_act = menu.addAction("Accept")
+                menu.addSeparator()
+            else:
+                # Always offer Accept as a no-op-able convenience; greyed out.
+                accept_act = menu.addAction("Accept")
+                accept_act.setEnabled(False)
+                menu.addSeparator()
+
+            # Splice the standard QLineEdit edit menu (Cut/Copy/Paste/etc.)
+            # for line edits — operators expect those to still work.
+            if isinstance(w, QLineEdit):
+                std = w.createStandardContextMenu()
+                for act in std.actions():
+                    menu.addAction(act)
+
+            chosen = menu.exec(w.mapToGlobal(pos))
+            if chosen is accept_act and accept_act is not None and accept_act.isEnabled():
+                # Re-emit the field's current value so the host's
+                # ``_update_field`` runs and flips status → approved +
+                # confidence → 1.0 (clearing conflicts in the process).
+                if isinstance(w, QLineEdit):
+                    text = w.text().strip()
+                elif isinstance(w, QComboBox):
+                    text = w.currentText().strip()
+                elif isinstance(w, QCheckBox):
+                    text = "Yes" if w.isChecked() else "No"
+                else:
+                    text = ""
+                self.field_changed.emit(t, text or None)
+                # Drop the local tint immediately so the operator sees
+                # confirmation. The full refresh repaints the rest.
+                w.setStyleSheet("")
+                w.setToolTip("")
+
+        widget.customContextMenuRequested.connect(on_menu)
+
     def _add_text(self, grid: QGridLayout, row: int, col: int,
                   label: str, tag: str, placeholder: str = "") -> QLineEdit:
         lbl = QLabel(label)
@@ -413,15 +806,52 @@ class SectionFormBase(QScrollArea):
         inp.setObjectName("FieldInput")
         if placeholder:
             inp.setPlaceholderText(placeholder)
+        is_currency = _is_currency_tag(tag)
+        rec = _record(self._state, tag)
         v = _val(self._state, tag)
         if v:
-            inp.setText(v)
+            inp.setText(_fmt_currency_display(v) if is_currency else v)
+        # Visual attention indicator — matches the per-cell tint in
+        # ``_populate_row`` so the tab badge and the singleton input
+        # styling agree on what needs attention. Audit-exempt tags
+        # (item_number, ...) skip this entirely.
+        att = "" if is_audit_exempt_tag(tag) else _input_attention_style(rec)
+        if att:
+            inp.setStyleSheet(att)
+            cfls = rec.get("conflicts") or [] if isinstance(rec, dict) else []
+            if cfls:
+                lines = [
+                    f"• {cf.get('value')!r}  "
+                    f"(from {(cf.get('source') or {}).get('doc_id', '?')})"
+                    for cf in cfls if isinstance(cf, dict)
+                ]
+                inp.setToolTip("Conflict — also extracted:\n" + "\n".join(lines))
+            elif rec is not None:
+                try:
+                    conf = float(rec.get("confidence", 0.0) or 0.0)
+                except (TypeError, ValueError):
+                    conf = 0.0
+                inp.setToolTip(f"Low confidence: {conf:.0%}")
 
-        def _done(t: str = tag, w: QLineEdit = inp) -> None:
+        def _done(t: str = tag, w: QLineEdit = inp, cur: bool = is_currency) -> None:
             text = w.text().strip()
+            # Persist raw digits; reformat the box back into masked form so
+            # the operator sees the canonical display after Tab/Enter.
             self.field_changed.emit(t, text if text else None)
+            if cur and text:
+                masked = _fmt_currency_display(text)
+                if masked != text:
+                    prev = w.blockSignals(True)
+                    try:
+                        w.setText(masked)
+                    finally:
+                        w.blockSignals(prev)
+            # Operator edit = operator approval — clear any tint/tooltip.
+            w.setStyleSheet("")
+            w.setToolTip("")
 
         inp.editingFinished.connect(_done)
+        self._install_singleton_accept_menu(inp, tag)
         self._inputs[tag] = inp
         gc = col * 2
         grid.addWidget(lbl, row, gc, Qt.AlignmentFlag.AlignTop)
@@ -447,6 +877,7 @@ class SectionFormBase(QScrollArea):
             self.field_changed.emit(t, text if text else None)
 
         combo.currentTextChanged.connect(_changed)
+        self._install_singleton_accept_menu(combo, tag)
         self._inputs[tag] = combo
         gc = col * 2
         grid.addWidget(lbl, row, gc, Qt.AlignmentFlag.AlignTop)
@@ -484,11 +915,25 @@ class SectionFormBase(QScrollArea):
             v = _val(self._state, tag)
             if v and v.lower() in {"true", "yes", "1", "checked", "on"}:
                 cb.setChecked(True)
+            # Mirror the singleton-input attention styling: yellow halo for
+            # low confidence, orange for conflicts. This is the only signal
+            # the operator has that a Yes/No checkbox isn't operator-blessed
+            # yet — without it a 0.8-confidence checkbox is indistinguishable
+            # from a fully-approved one.
+            rec = _record(self._state, tag)
+            cb_att = "" if is_audit_exempt_tag(tag) else _checkbox_attention_style(rec)
+            if cb_att:
+                cb.setStyleSheet(cb_att)
+                cb.setToolTip(_attention_tooltip(rec))
 
-            def _changed(checked: bool, t: str = tag) -> None:
+            def _changed(checked: bool, t: str = tag, w: QCheckBox = cb) -> None:
                 self.field_changed.emit(t, "Yes" if checked else "No")
+                # Operator clicked = operator approved. Drop the tint.
+                w.setStyleSheet("")
+                w.setToolTip("")
 
             cb.toggled.connect(_changed)
+            self._install_singleton_accept_menu(cb, tag)
             self._inputs[tag] = cb
             checkboxes[tag] = cb
             row_layout.addWidget(cb)
@@ -564,6 +1009,11 @@ class SectionFormBase(QScrollArea):
             if editable else QTableWidget.EditTrigger.NoEditTriggers
         )
         t.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        # ExtendedSelection lets the operator Ctrl/Shift-click multiple rows.
+        # The context menu's "Delete Row(s)" item batches into one prompt
+        # when 2+ rows are selected; right-click on a single row still works
+        # as before.
+        t.setSelectionMode(QTableWidget.SelectionMode.ExtendedSelection)
         t.setSortingEnabled(True)
         # Qt's setSortingEnabled(True) defaults the sort indicator to
         # column 0 DESCENDING, which makes row-numbered tables (Vehicles,
@@ -633,6 +1083,21 @@ class SectionFormBase(QScrollArea):
         except (RuntimeError, TypeError):
             pass
 
+        def _state_idx_for_row(_tbl, visible_row: int) -> int:
+            """Translate visible row → underlying state.repeatables index.
+
+            ``_populate_row`` writes the source index into column 0 via
+            ``_STATE_INDEX_ROLE``; reading it back is sorting-safe.  Falls
+            back to the visible row number if the marker isn't set (legacy
+            tables / freshly inserted rows).
+            """
+            marker = _tbl.item(visible_row, 0)
+            if marker is not None:
+                stored = marker.data(_STATE_INDEX_ROLE)
+                if isinstance(stored, int):
+                    return stored
+            return visible_row
+
         def on_context_menu(pos, _tbl=table, _g=group) -> None:
             index = _tbl.indexAt(pos)
             if not index.isValid():
@@ -656,10 +1121,130 @@ class SectionFormBase(QScrollArea):
                         act = menu.addAction(lbl)
                         resolve_actions.append((act, tag, cf_val))
                     menu.addSeparator()
-            del_act = menu.addAction("Delete Row")
+
+            # "Accept" / "Accept Row" / "Accept N Rows" actions — mark the
+            # cell or the whole row(s) as approved (status=approved,
+            # confidence=1.0). Tint clears, tab badge ticks down.
+            tag_idx = index.column() - offset
+            accept_act = None
+            accept_tag = None
+            if 0 <= tag_idx < len(tags):
+                accept_tag = tags[tag_idx]
+            if accept_tag and cell_item is not None:
+                accept_act = menu.addAction("Accept")
+
+            # Row-level accept. Mirrors the delete pattern — multi-select
+            # gets a batch action.
+            selected_rows_for_accept = sorted({r.row() for r in _tbl.selectionModel().selectedRows()})
+            if len(selected_rows_for_accept) >= 2 and index.row() in selected_rows_for_accept:
+                accept_row_act = menu.addAction(f"Accept {len(selected_rows_for_accept)} Rows")
+                accept_row_target_rows = selected_rows_for_accept
+            else:
+                accept_row_act = menu.addAction("Accept Row")
+                accept_row_target_rows = [index.row()]
+            menu.addSeparator()
+
+            # Build the delete action.  If multiple rows are selected AND the
+            # right-clicked row is one of them, the action deletes all of them
+            # in a single confirmation.  Otherwise it deletes just the row
+            # under the cursor (matches Qt's native delete-key behavior).
+            selected_rows = sorted({r.row() for r in _tbl.selectionModel().selectedRows()})
+            if len(selected_rows) >= 2 and index.row() in selected_rows:
+                del_act = menu.addAction(f"Delete {len(selected_rows)} Rows")
+                del_target_rows = selected_rows
+            else:
+                del_act = menu.addAction("Delete Row")
+                del_target_rows = [index.row()]
+
+            # "Move to..." submenu: only for tables that declare move
+            # targets (set by the IM form). Mirrors the delete pattern —
+            # multi-select moves go in one batch.
+            move_actions: list[tuple] = []  # (QAction, dest_group, dest_label)
+            move_target_rows = del_target_rows
+            move_targets = getattr(_tbl, "_move_targets", None)
+            if move_targets:
+                move_menu = menu.addMenu(
+                    f"Move {len(move_target_rows)} Row"
+                    f"{'s' if len(move_target_rows) > 1 else ''} to"
+                )
+                for dest_group, dest_label in move_targets:
+                    act = move_menu.addAction(dest_label)
+                    move_actions.append((act, dest_group, dest_label))
+
             chosen = menu.exec(_tbl.viewport().mapToGlobal(pos))
+            # Check move actions before delete so a Move pick doesn't trigger
+            # the delete branch.
+            for act, dest_group, dest_label in move_actions:
+                if chosen is act:
+                    state_idxs = sorted(
+                        {_state_idx_for_row(_tbl, r) for r in move_target_rows}
+                    )
+                    self._initiate_move(
+                        src_group=_g,
+                        dest_group=dest_group,
+                        src_state_idxs=state_idxs,
+                        dest_label=dest_label,
+                    )
+                    return
             if chosen is del_act:
-                self.field_changed.emit(f"__del:{_g}:{index.row()}", None)
+                # Map every visible row to its underlying state index, then
+                # encode as a comma-separated list for the host.
+                state_idxs = sorted({_state_idx_for_row(_tbl, r) for r in del_target_rows})
+                if len(state_idxs) == 1:
+                    self.field_changed.emit(f"__del:{_g}:{state_idxs[0]}", None)
+                else:
+                    payload = ",".join(str(i) for i in state_idxs)
+                    self.field_changed.emit(f"__del_many:{_g}:{payload}", None)
+            elif accept_act is not None and chosen is accept_act:
+                # Re-emit the cell's current value so the host's
+                # `_on_repeatable_commit` path runs and flips status →
+                # approved + confidence → 1.0. Clears any tint immediately
+                # for visual feedback (full state reload polishes the rest).
+                state_idx = _state_idx_for_row(_tbl, index.row())
+                cur_value = cell_item.text().strip() if cell_item else ""
+                self.field_changed.emit(
+                    f"__rep:{_g}:{state_idx}:{accept_tag}",
+                    cur_value or None,
+                )
+                _tbl._iga_block = True
+                cell_item.setBackground(QColor("white"))
+                cell_item.setForeground(QColor("#1e293b"))
+                cell_item.setToolTip("")
+                cell_item.setData(Qt.ItemDataRole.UserRole, None)
+                _tbl._iga_block = False
+            elif chosen is accept_row_act:
+                # Bulk-approve every record in the selected row(s). One
+                # encoded event covers single-row and multi-row alike;
+                # host parses the comma-separated state indices and walks
+                # each row's records.
+                state_idxs = sorted({
+                    _state_idx_for_row(_tbl, r) for r in accept_row_target_rows
+                })
+                if len(state_idxs) == 1:
+                    self.field_changed.emit(
+                        f"__accept_row:{_g}:{state_idxs[0]}", None,
+                    )
+                else:
+                    payload = ",".join(str(i) for i in state_idxs)
+                    self.field_changed.emit(
+                        f"__accept_rows:{_g}:{payload}", None,
+                    )
+                # Clear cell tints across every cell in those visible rows
+                # for immediate feedback. The full state-driven repaint
+                # handles anything we miss.
+                _tbl._iga_block = True
+                try:
+                    for vr in accept_row_target_rows:
+                        for c in range(_tbl.columnCount()):
+                            it = _tbl.item(vr, c)
+                            if it is None:
+                                continue
+                            it.setBackground(QColor("white"))
+                            it.setForeground(QColor("#1e293b"))
+                            it.setToolTip("")
+                            it.setData(Qt.ItemDataRole.UserRole, None)
+                finally:
+                    _tbl._iga_block = False
             elif chosen is not None:
                 for act, tag, val in resolve_actions:
                     if chosen is act:
@@ -676,6 +1261,72 @@ class SectionFormBase(QScrollArea):
                         break
 
         table.customContextMenuRequested.connect(on_context_menu)
+
+    def _initiate_move(
+        self,
+        *,
+        src_group: str,
+        dest_group: str,
+        src_state_idxs: list[int],
+        dest_label: str,
+    ) -> None:
+        """Build the destination rows for a move and emit the ``__move:`` signal.
+
+        Reads each selected source row from ``self._state`` (current
+        client snapshot), runs it through :func:`transform_im_row`, and
+        for destinations that have a 30-char cap (Unscheduled) prompts
+        the operator to shorten any over-limit description. Cancelling
+        any prompt aborts the entire move.
+
+        On success emits exactly one event:
+            ``__move:<src>:<dest>:<json>``
+        where ``<json>`` is a JSON-encoded list of
+        ``{"src_idx": int, "row": {tag: record, ...}}`` entries. The
+        host's repeatable-move handler pops the source rows in
+        descending index order and appends the new rows to the
+        destination.
+        """
+        import json as _json
+
+        if not src_state_idxs:
+            return
+        state = getattr(self, "_state", None) or {}
+        rep = (state.get("repeatables") or {}) if isinstance(state, dict) else {}
+        src_items: list = rep.get(src_group) or []
+
+        out_rows: list[dict] = []
+        for src_idx in src_state_idxs:
+            if not (0 <= src_idx < len(src_items)):
+                continue
+            src_item = src_items[src_idx]
+            transformed = transform_im_row(src_item, src_group, dest_group)
+            # Drop None records before length checks / persistence.
+            dest_row = {k: v for k, v in transformed.items() if v is not None}
+
+            # Only the Unscheduled destination has a hard cap we enforce.
+            if dest_group == _IM_UNSCHED_GROUP:
+                desc_tag = f"{dest_group}.description"
+                rec = dest_row.get(desc_tag)
+                proposed = rec.get("value", "") if isinstance(rec, dict) else ""
+                if len(proposed) > _UNSCHED_DESC_MAX:
+                    shortened = _prompt_shorten(
+                        self, proposed, _UNSCHED_DESC_MAX,
+                        label_prefix=f"Row from {src_group.rsplit('.', 1)[-1]}",
+                    )
+                    if shortened is None:
+                        # User cancelled — abort the entire move.
+                        return
+                    dest_row[desc_tag] = {"value": shortened}
+
+            out_rows.append({"src_idx": src_idx, "row": dest_row})
+
+        if not out_rows:
+            return
+
+        payload = _json.dumps(out_rows, ensure_ascii=False)
+        self.field_changed.emit(
+            f"__move:{src_group}:{dest_group}:{payload}", None,
+        )
 
     def _add_row_btn(self, label: str, group: str) -> QPushButton:
         btn = QPushButton(label)
@@ -759,12 +1410,15 @@ class SectionFormBase(QScrollArea):
                 fg: QColor | None = None
                 tip: str = ""
                 user_data: dict | None = None
+                # Audit-exempt tags (item_number, ...) skip every tint/badge
+                # path — they're mechanical identifiers, not extracted data.
+                tag_exempt = is_audit_exempt_tag(tag)
                 if tag is not None:
                     rec = item.get(tag)
                     if isinstance(rec, dict):
                         v = str(rec.get("value") or "")
                         cfls = rec.get("conflicts") or []
-                        if cfls:
+                        if cfls and not tag_exempt:
                             # Conflict takes priority over confidence tinting.
                             bg = QColor("#fff7ed")
                             fg = QColor("#c2410c")
@@ -784,7 +1438,7 @@ class SectionFormBase(QScrollArea):
                                 f"Current: {rec.get('value')!r}  (from {src_doc})\n\n"
                                 f"Also extracted:\n" + "\n".join(lines)
                             )
-                        else:
+                        elif not tag_exempt:
                             conf = float(rec.get("confidence") or 0.0)
                             status = str(rec.get("status") or "")
                             tint = confidence_color(conf, status)
@@ -796,6 +1450,11 @@ class SectionFormBase(QScrollArea):
                                 tip = f"{label}: {conf:.0%}  (from {src_doc})"
                     else:
                         v = str(rec) if rec is not None else ""
+                # Apply currency formatting to the displayed text when this
+                # column's tag is currency-shaped. Storage stays raw digits;
+                # this is display-only.
+                if v and _is_currency_tag(tag):
+                    v = _fmt_currency_display(v)
                 cell = _SortableTableItem(v)
                 if bg is not None:
                     cell.setBackground(bg)
@@ -882,6 +1541,7 @@ class SectionFormBase(QScrollArea):
         self,
         lob_namespace: str,
         *,
+        subject_ref_columns: "list[tuple[str, str]] | None" = None,
         subject_ref_label: str | None = None,
         subject_ref_leaf: str | None = None,
     ) -> QTableWidget:
@@ -889,20 +1549,30 @@ class SectionFormBase(QScrollArea):
 
         :param lob_namespace: ``policy.<lob>`` — the repeatable group is
             ``f"{lob_namespace}.additional_interest"``.
-        :param subject_ref_label: optional column header for an LOB-specific
-            subject reference (e.g., 'Veh #' for Auto, 'Item #' for IM,
-            'Subject #' for Property). Inserted before the Interest column.
-        :param subject_ref_leaf: leaf tag for the subject reference field.
-            Required when ``subject_ref_label`` is set.
+        :param subject_ref_columns: optional list of ``(label, leaf)`` tuples
+            for LOB-specific subject reference columns inserted between the
+            Address and Interest columns. Use this when an LOB needs multiple
+            reference columns (Property needs both ``Loc #`` and ``Bldg #``).
+        :param subject_ref_label: legacy single-column shortcut equivalent to
+            ``subject_ref_columns=[(label, leaf)]``. Kept for backward compat
+            with existing Auto / IM call sites.
+        :param subject_ref_leaf: leaf tag matching ``subject_ref_label``.
         """
+        # Coalesce the two ways of passing subject-ref columns into one list.
+        ref_cols: list[tuple[str, str]] = []
+        if subject_ref_columns:
+            ref_cols.extend(subject_ref_columns)
+        if subject_ref_label and subject_ref_leaf:
+            ref_cols.append((subject_ref_label, subject_ref_leaf))
+
         self._ai_group = f"{lob_namespace}.additional_interest"
         cols: list[tuple[str, str]] = [
             ("Type",     f"{self._ai_group}.interest"),
             ("Name",     f"{self._ai_group}.name"),
             ("Address",  f"{self._ai_group}.primary_address.line_1"),
         ]
-        if subject_ref_label and subject_ref_leaf:
-            cols.append((subject_ref_label, f"{self._ai_group}.{subject_ref_leaf}"))
+        for lbl, leaf in ref_cols:
+            cols.append((lbl, f"{self._ai_group}.{leaf}"))
         cols.append(("Interest", f"{self._ai_group}.reason_for_int"))
 
         self._ai_tags = [t for _lbl, t in cols]
@@ -919,8 +1589,10 @@ class SectionFormBase(QScrollArea):
         tbl.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
         tbl.setColumnWidth(0, 130)
         tbl.setColumnWidth(len(cols) - 1, 180)
-        if subject_ref_label and subject_ref_leaf:
-            tbl.setColumnWidth(3, 70)
+        # Subject-ref columns get a narrow fixed width (Loc # / Bldg # / Veh #
+        # / Item # are all single digits in practice).
+        for offset, _ in enumerate(ref_cols):
+            tbl.setColumnWidth(3 + offset, 70)
         tbl.setMinimumHeight(_TBL_HEIGHT_6_ROWS)
         self._wire_table_edits(tbl, self._ai_group, self._ai_tags)
         return tbl
@@ -988,20 +1660,25 @@ class SectionFormBase(QScrollArea):
             v = _val(state, tag)
             widget.blockSignals(True)
             if isinstance(widget, QLineEdit):
-                widget.setText(v)
-                rec = state_fields.get(tag)
-                cfls = (rec.get("conflicts") or []) if isinstance(rec, dict) else []
-                if cfls:
-                    widget.setStyleSheet(
-                        "QLineEdit#FieldInput { border: 1px solid #f97316;"
-                        " background: #fff7ed; }"
-                    )
-                    lines = [
-                        f"• {cf.get('value')!r}  "
-                        f"(from {(cf.get('source') or {}).get('doc_id', '?')})"
-                        for cf in cfls if isinstance(cf, dict)
-                    ]
-                    widget.setToolTip("Conflict — also extracted:\n" + "\n".join(lines))
+                widget.setText(_fmt_currency_display(v) if (v and _is_currency_tag(tag)) else v)
+                rec = state_fields.get(tag) if isinstance(state_fields, dict) else None
+                att = "" if is_audit_exempt_tag(tag) else _input_attention_style(rec)
+                if att:
+                    widget.setStyleSheet(att)
+                    cfls = rec.get("conflicts") or [] if isinstance(rec, dict) else []
+                    if cfls:
+                        lines = [
+                            f"• {cf.get('value')!r}  "
+                            f"(from {(cf.get('source') or {}).get('doc_id', '?')})"
+                            for cf in cfls if isinstance(cf, dict)
+                        ]
+                        widget.setToolTip("Conflict — also extracted:\n" + "\n".join(lines))
+                    elif rec is not None:
+                        try:
+                            conf = float(rec.get("confidence", 0.0) or 0.0)
+                        except (TypeError, ValueError):
+                            conf = 0.0
+                        widget.setToolTip(f"Low confidence: {conf:.0%}")
                 else:
                     widget.setStyleSheet("")
                     widget.setToolTip("")
@@ -1010,6 +1687,16 @@ class SectionFormBase(QScrollArea):
                 widget.setCurrentIndex(max(idx, 0))
             elif isinstance(widget, _SymbolWidget):
                 widget.setText(v)
+            elif isinstance(widget, QCheckBox):
+                widget.setChecked(bool(v) and v.lower() in {"true", "yes", "1", "checked", "on"})
+                rec = state_fields.get(tag) if isinstance(state_fields, dict) else None
+                cb_att = "" if is_audit_exempt_tag(tag) else _checkbox_attention_style(rec)
+                if cb_att:
+                    widget.setStyleSheet(cb_att)
+                    widget.setToolTip(_attention_tooltip(rec))
+                else:
+                    widget.setStyleSheet("")
+                    widget.setToolTip("")
             widget.blockSignals(False)
         self._refresh_tables(state)
         self._refresh_all_section_counts()
@@ -1258,12 +1945,14 @@ class _StatesMultiSelectWidget(QWidget):
 
         popup.itemChanged.connect(on_item_changed)
 
-        # Click-outside-to-close: install an event filter so we close on
-        # FocusOut. Qt.Popup is supposed to close on outside click natively,
-        # but on Windows that detection sometimes misses when focus moves
-        # to another widget within the same app — the user has to click
-        # outside the entire app to dismiss. The FocusOut hook fires
-        # whenever focus leaves the popup, which covers every case.
+        # Click-outside-to-close: previously relied on Qt.Popup's native
+        # outside-click handling + a FocusOut filter as backup.  Both proved
+        # unreliable on Windows when toggling checkboxes inside the popup
+        # (the popup never loses focus, and Qt.Popup's mouse tracking can
+        # miss clicks that land on app-internal widgets).  Robust fix: a
+        # single application-wide event filter on MouseButtonPress that
+        # closes the popup whenever the click lands outside its global
+        # geometry.  Filter is removed when the popup closes.
         popup.installEventFilter(self)
 
         # Anchor under the button.
@@ -1271,18 +1960,51 @@ class _StatesMultiSelectWidget(QWidget):
         popup.move(gpos)
         popup.resize(max(self._btn.width(), 240), 360)
         popup.show()
-        # Make the popup the active window AND give it keyboard focus so
-        # Qt.Popup's outside-click tracking and our FocusOut filter both fire.
         popup.activateWindow()
         popup.setFocus(Qt.FocusReason.PopupFocusReason)
         self._popup = popup
 
+        # Hook app-wide mouse-press detection while the popup is open.
+        app = QApplication.instance()
+        if app is not None:
+            app.installEventFilter(self)
+            self._app_filter_installed = True
+
+    def _close_popup(self) -> None:
+        """Tear down the popup and remove the app-wide filter."""
+        if self._popup is not None:
+            self._popup.close()
+            self._popup = None
+        if getattr(self, "_app_filter_installed", False):
+            app = QApplication.instance()
+            if app is not None:
+                app.removeEventFilter(self)
+            self._app_filter_installed = False
+
     def eventFilter(self, obj: QObject, event: QEvent) -> bool:
-        """Close the popup when it loses focus (user clicked outside)."""
-        if self._popup is not None and obj is self._popup:
-            if event.type() == QEvent.Type.FocusOut:
-                self._popup.close()
-                self._popup = None
+        """Close the popup when:
+          - It loses focus (FocusOut), OR
+          - A mouse press lands outside the popup's geometry (app-wide filter).
+        """
+        if self._popup is None:
+            return super().eventFilter(obj, event)
+        # Local FocusOut filter (kept as belt-and-suspenders)
+        if obj is self._popup and event.type() == QEvent.Type.FocusOut:
+            self._close_popup()
+            return super().eventFilter(obj, event)
+        # App-wide mouse-press filter: any press outside the popup closes it.
+        if event.type() == QEvent.Type.MouseButtonPress:
+            # `event.globalPosition()` is a QPointF; convert to QPoint for
+            # geometry containment.
+            try:
+                gp = event.globalPosition().toPoint()
+            except AttributeError:
+                # Older Qt versions fall back to globalPos()
+                gp = event.globalPos()
+            if not self._popup.frameGeometry().contains(gp):
+                self._close_popup()
+                # Don't consume the event — let the user's intended click go
+                # through to whatever they actually targeted.
         return super().eventFilter(obj, event)
 
 
@@ -1739,8 +2461,10 @@ class PropertyForm(SectionFormBase):
         self._root.addWidget(self._add_cov_tbl)
         self._ai_tbl = self._add_ai_section(
             "policy.property",
-            subject_ref_label="Loc #",
-            subject_ref_leaf="location_number",
+            subject_ref_columns=[
+                ("Loc #",  "location_number"),
+                ("Bldg #", "building_number"),
+            ],
         )
         self._root.addWidget(self._ai_tbl)
 
@@ -1843,10 +2567,21 @@ class BusinessAutoForm(SectionFormBase):
                 inp.setMaximumWidth(160)
                 v = _val(self._state, ltag)
                 if v:
-                    inp.setText(v)
+                    # BAUT coverage rows are always currency limits — format
+                    # the display the same way the rest of the singletons do.
+                    inp.setText(_fmt_currency_display(v))
 
                 def _ldone(t: str = ltag, w: QLineEdit = inp) -> None:
-                    self.field_changed.emit(t, w.text().strip() or None)
+                    text = w.text().strip()
+                    self.field_changed.emit(t, text or None)
+                    if text:
+                        masked = _fmt_currency_display(text)
+                        if masked != text:
+                            prev = w.blockSignals(True)
+                            try:
+                                w.setText(masked)
+                            finally:
+                                w.blockSignals(prev)
 
                 inp.editingFinished.connect(_ldone)
                 self._inputs[ltag] = inp
@@ -1898,12 +2633,15 @@ class BusinessAutoForm(SectionFormBase):
         self._root.addWidget(ba_wrap)
 
         self._veh_group = "policy.auto.vehicle"
+        # Type column dropped per 2026-05-26 UX pass — body_type isn't used
+        # by the entry walker and rarely populated by extraction, so it just
+        # added a wide empty column. Storage still holds the value; only the
+        # display column was removed.
         self._veh_tags: list[str | None] = [
             f"{self._veh_group}.year",
             f"{self._veh_group}.make",
             f"{self._veh_group}.model",
             f"{self._veh_group}.vin",
-            f"{self._veh_group}.body_type",
             f"{self._veh_group}.garage_address.line_1",
             f"{self._veh_group}.comprehensive_deductible",
             f"{self._veh_group}.collision_deductible",
@@ -1914,7 +2652,7 @@ class BusinessAutoForm(SectionFormBase):
                               show_count=True)
         )
         self._veh_tbl = self._table(
-            9, ["#", "Year", "Make", "Model", "VIN", "Type",
+            8, ["#", "Year", "Make", "Model", "VIN",
                 "Garaging Address", "Comp Ded", "Coll Ded"]
         )
         self._veh_tbl.setColumnWidth(0, 36)
@@ -1922,10 +2660,9 @@ class BusinessAutoForm(SectionFormBase):
         self._veh_tbl.setColumnWidth(2, 80)
         self._veh_tbl.setColumnWidth(3, 100)
         self._veh_tbl.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)
-        self._veh_tbl.setColumnWidth(5, 90)
-        self._veh_tbl.setColumnWidth(6, 140)
+        self._veh_tbl.setColumnWidth(5, 140)
+        self._veh_tbl.setColumnWidth(6, 80)
         self._veh_tbl.setColumnWidth(7, 80)
-        self._veh_tbl.setColumnWidth(8, 80)
         self._veh_tbl.setMinimumHeight(_TBL_HEIGHT_6_ROWS)
         self._wire_table_edits(self._veh_tbl, self._veh_group, self._veh_tags, offset=1)
         self._root.addWidget(self._veh_tbl)
@@ -2010,10 +2747,27 @@ class InlandMarineForm(SectionFormBase):
         self._root.addLayout(g)
 
         self._root.addWidget(_hr())
-        self._root.addLayout(
-            self._section_row("Scheduled Items", "+ Add Item", self.SCHED_GROUP,
-                              show_count=True)
+        sched_row = self._section_row(
+            "Scheduled Items", "+ Add Item", self.SCHED_GROUP, show_count=True,
         )
+        # "Possible duplicates" button, placed between the stretch and
+        # the + Add Item button. Lights up (orange) when the
+        # similarity-scored detector finds any flagged rows. Clicking
+        # cycles through the flagged rows in the Scheduled table —
+        # scrolls each into view and selects it so the operator can
+        # review and resolve with the existing delete / move actions.
+        self._dup_btn = QPushButton("Possible duplicates (0)")
+        self._dup_btn.setObjectName("DupBtn")
+        self._dup_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._dup_btn.setEnabled(False)
+        self._dup_btn.clicked.connect(self._on_dup_btn_clicked)
+        # Insert just before the + Add Item button (which is the last
+        # item in the row layout, at position count()-1).
+        sched_row.insertWidget(sched_row.count() - 1, self._dup_btn)
+        self._root.addLayout(sched_row)
+        self._dup_flagged_rows: list[int] = []
+        self._dup_groups: list[list[int]] = []
+        self._dup_filter_active: bool = False
         self._sched_tags: list[str | None] = [
             f"{self.SCHED_GROUP}.item_number",
             f"{self.SCHED_GROUP}.model_year",
@@ -2074,7 +2828,134 @@ class InlandMarineForm(SectionFormBase):
             subject_ref_leaf="item_number",
         )
         self._root.addWidget(self._ai_tbl)
+
+        # Cross-section "Move to..." right-click targets. Read by the
+        # context-menu builder in `_wire_table_edits`. Each tuple is
+        # (destination_group, destination_label).
+        self._sched_tbl._move_targets = [
+            (_IM_UNSCHED_GROUP, "Unscheduled Equipment"),
+            (_IM_AC_GROUP,      "Additional Coverages"),
+        ]
+        self._unsched_tbl._move_targets = [
+            (_IM_SCHED_GROUP,   "Scheduled Equipment"),
+            (_IM_AC_GROUP,      "Additional Coverages"),
+        ]
+        self._add_cov_tbl._move_targets = [
+            (_IM_SCHED_GROUP,   "Scheduled Equipment"),
+            (_IM_UNSCHED_GROUP, "Unscheduled Equipment"),
+        ]
         # Base __init__ runs _refresh_tables right after this — don't double-call.
+
+    def _on_dup_btn_clicked(self) -> None:
+        """Toggle the duplicate-review filter on the Scheduled table.
+
+        First click (filter ON): hide every row that isn't flagged as a
+        possible duplicate, then reorder the visible rows so each
+        duplicate group is contiguous (so all members of a group can
+        be compared side by side). Button text becomes "Finish
+        reviewing".
+
+        Second click (filter OFF): re-run :meth:`refresh` which
+        re-populates the table in canonical state-index order and
+        un-hides all rows. Recomputes flagged-row set and group list
+        for the next click. Button text reverts to "Show potential
+        duplicates (N)".
+        """
+        if not self._dup_flagged_rows:
+            return
+        if self._dup_filter_active:
+            # Restore: full refresh from state — re-populates rows in
+            # canonical order, re-runs dedupe / dup detection / etc.
+            # Re-enable sorting before the refresh: _apply_dup_filter
+            # disabled it and _refresh_tables preserves the entry
+            # state, so without this force-enable the table would stay
+            # in "sorting disabled" mode after the refresh.
+            self._sched_tbl.setSortingEnabled(True)
+            self.refresh(self._state)
+            return
+        self._apply_dup_filter()
+
+    def _apply_dup_filter(self) -> None:
+        """Hide non-flagged rows and reorder flagged ones by group.
+
+        Translates the state-index values in ``_dup_flagged_rows`` and
+        ``_dup_groups`` to current visual row indices via the
+        ``_STATE_INDEX_ROLE`` marker on column 0. The translation is
+        required because Qt may have sorted the table after
+        ``_refresh_tables`` populated it in state-index order — without
+        translation, the reorder operates on the wrong visual positions
+        and flagged rows aren't actually the ones at the top.
+        """
+        table = self._sched_tbl
+        n = table.rowCount()
+
+        # Build a state-index → current visual-row map.
+        state_to_visual: dict[int, int] = {}
+        for vis_r in range(n):
+            cell = table.item(vis_r, 0)
+            if cell is None:
+                continue
+            si = cell.data(_STATE_INDEX_ROLE)
+            if isinstance(si, int):
+                state_to_visual[si] = vis_r
+
+        flagged_visual = {
+            state_to_visual.get(si, si) for si in self._dup_flagged_rows
+        }
+
+        # Build visible_order in group order, translated to visual rows.
+        visible_order: list[int] = []
+        seen: set[int] = set()
+        for group in self._dup_groups:
+            for si in group:
+                vis = state_to_visual.get(si, si)
+                if vis in flagged_visual and vis not in seen:
+                    visible_order.append(vis)
+                    seen.add(vis)
+        tail = [r for r in range(n) if r not in seen]
+        new_order = visible_order + tail
+        self._reorder_table_rows(table, new_order)
+        n_visible = len(visible_order)
+        for vis_r in range(n):
+            table.setRowHidden(vis_r, vis_r >= n_visible)
+        self._dup_filter_active = True
+        if hasattr(self, "_dup_btn"):
+            self._dup_btn.setText("Finish reviewing")
+
+    @staticmethod
+    def _reorder_table_rows(table: QTableWidget, new_order: list[int]) -> None:
+        """Reorder rows of *table* so visual row i contains what was
+        previously row ``new_order[i]``. Cells are physically moved
+        (``takeItem`` + ``setItem``) so per-cell metadata (state-index
+        marker, tooltips, backgrounds, sort keys) travels with them.
+
+        Sorting is disabled on entry and **left disabled** on exit —
+        re-enabling it would immediately re-sort by the active sort
+        column and undo the manual ordering. The caller is responsible
+        for re-enabling sort when appropriate (e.g., when exiting
+        filter mode).
+        """
+        n = table.rowCount()
+        if not new_order or len(new_order) != n:
+            return
+        cols = table.columnCount()
+        prev_block = getattr(table, "_iga_block", False)
+        table.setSortingEnabled(False)
+        table._iga_block = True
+        try:
+            cells: list[list[QTableWidgetItem | None]] = [
+                [table.takeItem(r, c) for c in range(cols)]
+                for r in range(n)
+            ]
+            for new_r, old_r in enumerate(new_order):
+                if not (0 <= old_r < n):
+                    continue
+                for c in range(cols):
+                    item = cells[old_r][c]
+                    if item is not None:
+                        table.setItem(new_r, c, item)
+        finally:
+            table._iga_block = prev_block
 
     @staticmethod
     def _strip_ymm(desc: str, year: str, make: str, model: str) -> str:
@@ -2100,6 +2981,14 @@ class InlandMarineForm(SectionFormBase):
             return
         sched = _rep(state, self.SCHED_GROUP)
         self._sched_tbl.setRowCount(len(sched))
+        # Un-hide every row before populating. The duplicate-review
+        # filter may have called setRowHidden on a prior refresh — if
+        # we don't reset here, the new data lands in rows that are
+        # still hidden and the table appears to show only a few items
+        # (or none) even though state has many entries. setRowCount()
+        # does NOT reset hidden flags for rows that survive the resize.
+        for _r in range(self._sched_tbl.rowCount()):
+            self._sched_tbl.setRowHidden(_r, False)
         # Disable sorting once for the entire post-processing pass — the
         # per-row `setItem` calls below would otherwise trigger Qt to
         # reorder rows after every assignment and corrupt the loop.
@@ -2127,19 +3016,244 @@ class InlandMarineForm(SectionFormBase):
 
         self._autofit_columns(self._sched_tbl)
 
-        # Auto-assign item numbers if none were extracted (display-only;
-        # persists when the user edits any cell, or on the next extraction).
+        # Dedupe item numbers: any duplicate or blank gets the next unused
+        # positive integer. Mirrors the EPIC-side _ensure_unique_item_numbers
+        # so what the user sees is exactly what gets entered. Every change
+        # is persisted back to state.json via ``field_changed`` so the GUI
+        # and on-disk state stay in lockstep — no "display-only" drift.
         _num_tag = f"{self.SCHED_GROUP}.item_number"
-        _all_blank = all(
-            not (isinstance(item.get(_num_tag), dict) and
-                 str(item.get(_num_tag, {}).get("value") or "").strip())
-            for item in sched
-        )
-        if _all_blank and sched:
+        _used: set[str] = set()
+        _next_free = 1
+        for r, item in enumerate(sched):
+            _rec = item.get(_num_tag)
+            _raw = (str(_rec.get("value") or "").strip()
+                    if isinstance(_rec, dict) else "")
+            if _raw and _raw not in _used:
+                _used.add(_raw)
+                continue
+            while str(_next_free) in _used:
+                _next_free += 1
+            _new = str(_next_free)
+            _used.add(_new)
+            _next_free += 1
+            # Update the cell without firing cellChanged — we emit
+            # field_changed explicitly so the persistence path runs once
+            # per renumbered row with the correct state index. The
+            # _STATE_INDEX_ROLE marker MUST be re-set on the new cell:
+            # the duplicate-filter relies on this marker to translate
+            # state indices to visual rows when the table is sorted,
+            # and a fresh _SortableTableItem starts with no role data.
+            _prev_block = getattr(self._sched_tbl, "_iga_block", False)
             self._sched_tbl._iga_block = True
-            for r in range(self._sched_tbl.rowCount()):
-                self._sched_tbl.setItem(r, 0, _SortableTableItem(str(r + 1)))
-            self._sched_tbl._iga_block = False
+            _new_cell = _SortableTableItem(_new)
+            _new_cell.setData(_STATE_INDEX_ROLE, r)
+            self._sched_tbl.setItem(r, 0, _new_cell)
+            self._sched_tbl._iga_block = _prev_block
+            self.field_changed.emit(
+                f"__rep:{self.SCHED_GROUP}:{r}:{_num_tag}", _new,
+            )
+
+        # Possible-duplicate detection (rule-based, 2026-05-26).
+        #
+        # Two source documents on the same dec can produce two rows
+        # for the same physical item — one with a serial and one
+        # without, or with slight description variations. Operator
+        # rules:
+        #
+        #   1. BOTH rows have a serial: compare ONLY the normalized
+        #      serials (alphanumeric chars, uppercased). Match iff
+        #      equal. Different serials = NOT a duplicate, regardless
+        #      of how similar the other fields are.
+        #
+        #   2. ONE or NEITHER has a serial: year and amount MUST match
+        #      exactly. Make and model use fuzzy match — alias map for
+        #      "Chevy"/"Chevrolet", "JD"/"John Deere", etc.;
+        #      corporate-suffix strip for "Topcon LTD" → "Topcon";
+        #      token-prefix so "Topcon" ⊆ "Topcon Holdings".
+        import re as _re
+
+        _MAKE_ALIASES = {
+            "chevy": "chevrolet",
+            "chev": "chevrolet",
+            "cat": "caterpillar",
+            "jd": "john deere",
+            "ih": "international harvester",
+            "intl": "international",
+            "mb": "mercedes-benz",
+            "vw": "volkswagen",
+            "kw": "kenworth",
+            "fl": "freightliner",
+        }
+        _MAKE_SUFFIXES = frozenset({
+            "ltd", "limited",
+            "inc", "incorporated",
+            "corp", "corporation",
+            "co", "company",
+            "llc",
+            "holdings", "group", "partners",
+            "sales", "services",
+            "mfg", "manufacturing", "mfr",
+            "division", "div", "dba",
+        })
+
+        def _norm_serial(s: str) -> str:
+            return _re.sub(r"[^A-Za-z0-9]", "", str(s or "")).upper()
+
+        def _norm_make_tokens(s: str) -> list[str]:
+            s2 = _re.sub(r"[^A-Za-z0-9 ]", " ", str(s or "")).lower()
+            s2 = _re.sub(r"\s+", " ", s2).strip()
+            if not s2:
+                return []
+            if s2 in _MAKE_ALIASES:
+                s2 = _MAKE_ALIASES[s2]
+            tokens = s2.split()
+            while tokens and tokens[-1] in _MAKE_SUFFIXES:
+                tokens.pop()
+            return tokens
+
+        def _norm_model(s: str) -> str:
+            return _re.sub(r"[^A-Za-z0-9]", "", str(s or "")).upper()
+
+        def _norm_amount(s: str) -> int | None:
+            digits = _re.sub(r"[^\d.]", "", str(s or ""))
+            if not digits:
+                return None
+            try:
+                return int(float(digits))
+            except ValueError:
+                return None
+
+        def _makes_match(a: str, b: str) -> bool:
+            ta = _norm_make_tokens(a)
+            tb = _norm_make_tokens(b)
+            if not ta or not tb:
+                return False
+            short, long_ = (ta, tb) if len(ta) <= len(tb) else (tb, ta)
+            return short == long_[: len(short)]
+
+        def _models_match(a: str, b: str) -> bool:
+            na, nb = _norm_model(a), _norm_model(b)
+            return bool(na) and bool(nb) and na == nb
+
+        # Per-row features for matching + tooltip rendering.
+        _feats: list[dict] = []
+        for _r, _item in enumerate(sched):
+            def _v_of(tag: str, _it=_item) -> str:
+                rec = _it.get(f"{self.SCHED_GROUP}.{tag}")
+                return str(rec.get("value") or "").strip() if isinstance(rec, dict) else ""
+            _feats.append({
+                "year":   _v_of("model_year"),
+                "make":   _v_of("manufacturer"),
+                "model":  _v_of("model"),
+                "amount": _norm_amount(_v_of("amt_insurance")),
+                "serial": _norm_serial(_v_of("serial_number")),
+            })
+
+        def _is_potential_dup(i: int, j: int) -> tuple[bool, str]:
+            """Return (is_dup, reason_for_tooltip)."""
+            fi, fj = _feats[i], _feats[j]
+            si, sj = fi["serial"], fj["serial"]
+            if si and sj:
+                # Both have serials — strict serial-equality rule.
+                if si == sj:
+                    return True, "same serial number"
+                return False, ""
+            # At least one missing serial: exact year + exact amount
+            # + fuzzy make + fuzzy model.
+            if not fi["year"] or not fj["year"] or fi["year"] != fj["year"]:
+                return False, ""
+            if (fi["amount"] is None or fj["amount"] is None
+                    or fi["amount"] != fj["amount"]):
+                return False, ""
+            if not _makes_match(fi["make"], fj["make"]):
+                return False, ""
+            if not _models_match(fi["model"], fj["model"]):
+                return False, ""
+            return True, "same year, make, model, and amount"
+
+        # Pairwise check + union-find clustering (A↔B + B↔C → {A,B,C}).
+        _flagged: set[int] = set()
+        _row_best: dict[int, tuple[int, str]] = {}
+        _parent = list(range(len(sched)))
+
+        def _find(x: int) -> int:
+            while _parent[x] != x:
+                _parent[x] = _parent[_parent[x]]
+                x = _parent[x]
+            return x
+
+        def _union(a: int, b: int) -> None:
+            ra, rb = _find(a), _find(b)
+            if ra != rb:
+                _parent[ra] = rb
+
+        for i in range(len(sched)):
+            for j in range(i + 1, len(sched)):
+                ok, reason = _is_potential_dup(i, j)
+                if not ok:
+                    continue
+                _flagged.add(i)
+                _flagged.add(j)
+                _union(i, j)
+                _row_best.setdefault(i, (j, reason))
+                _row_best.setdefault(j, (i, reason))
+
+        # Cluster flagged rows into groups via union-find roots, then
+        # sort groups by their lowest row index for stable display order.
+        _groups_by_root: dict[int, list[int]] = {}
+        for _r in _flagged:
+            _root = _find(_r)
+            _groups_by_root.setdefault(_root, []).append(_r)
+        self._dup_groups = sorted(
+            (sorted(g) for g in _groups_by_root.values()),
+            key=lambda g: g[0],
+        )
+
+        # Stash the flagged rows + update the "Possible duplicates"
+        # button. Any prior filter is cleared because this is a fresh
+        # full refresh — all rows are visible and in canonical order.
+        self._dup_flagged_rows = sorted(_flagged)
+        self._dup_filter_active = False
+        if hasattr(self, "_dup_btn"):
+            _n = len(self._dup_flagged_rows)
+            if _n > 0:
+                self._dup_btn.setText(f"Show potential duplicates ({_n})")
+                self._dup_btn.setEnabled(True)
+                self._dup_btn.setStyleSheet(
+                    "QPushButton#DupBtn { background: #fde68a; "
+                    "color: #78350f; border: 1px solid #f59e0b; "
+                    "font-weight: 600; padding: 6px 12px; "
+                    "border-radius: 4px; }"
+                    "QPushButton#DupBtn:hover { background: #fcd34d; }"
+                )
+            else:
+                self._dup_btn.setText("Possible duplicates (0)")
+                self._dup_btn.setEnabled(False)
+                self._dup_btn.setStyleSheet("")
+
+        _DUP_TINT = QColor("#fef08a")  # pale yellow — distinct from the
+                                       # conflict #fff7ed (peach) tint.
+        for _r in sorted(_flagged):
+            _other_r, _reason = _row_best[_r]
+            _other_cell = self._sched_tbl.item(_other_r, 0)
+            _other_lbl = _other_cell.text() if _other_cell else str(_other_r + 1)
+            _tip = (
+                f"Possible duplicate of item #{_other_lbl} ({_reason}).\n"
+                "Review and delete or merge if these represent the "
+                "same equipment."
+            )
+            _prev_block = getattr(self._sched_tbl, "_iga_block", False)
+            self._sched_tbl._iga_block = True
+            _item_cell = self._sched_tbl.item(_r, 0)
+            if _item_cell is not None:
+                _item_cell.setBackground(_DUP_TINT)
+                _item_cell.setToolTip(_tip)
+            for _col in (1, 2, 3):
+                _sig_cell = self._sched_tbl.item(_r, _col)
+                if _sig_cell is not None:
+                    _sig_cell.setToolTip(_tip)
+            self._sched_tbl._iga_block = _prev_block
+
         if _prev_sort_sched:
             self._sched_tbl.setSortingEnabled(True)
 
@@ -2159,17 +3273,98 @@ class InlandMarineForm(SectionFormBase):
             _inp = self._inputs.get("policy.inland_marine.total_scheduled_amount")
             if isinstance(_inp, QLineEdit):
                 _inp.blockSignals(True)
-                _inp.setText(f"{int(_total):,}")
+                _inp.setText(f"${int(_total):,}")
                 _inp.blockSignals(False)
+
+        # Canonical currency display for the Scheduled table: col 6 =
+        # Deductible, col 7 = Limit. (No row_num offset on this table.)
+        _reformat_currency_cells(self._sched_tbl, [6, 7])
 
         unsched = _rep(state, self.UNSCHED_GROUP)
         self._unsched_tbl.setRowCount(len(unsched))
+        # EPIC caps the Unscheduled description at 30 characters. The
+        # canonical short form lives in state.json under the sibling
+        # ``description_short`` tag (defined in
+        # ``Library/Epic Field Map.json``). On refresh:
+        #   1. If state already has description_short, display it.
+        #   2. If not AND description > 30 chars, compute via Claude,
+        #      persist to state via field_changed (so future refreshes
+        #      across app restarts skip the API call), and display.
+        #   3. If description ≤ 30, no short form needed — display the
+        #      original verbatim.
+        # The full description is always available on hover.
+        _abbreviate = None
+        try:
+            from iga_marketing_master_2.claude_client import abbreviate_for_epic as _abbreviate
+        except Exception:  # noqa: BLE001
+            _abbreviate = None
+        _short_tag = f"{self.UNSCHED_GROUP}.description_short"
+        _desc_tag = f"{self.UNSCHED_GROUP}.description"
         for r, item in enumerate(unsched):
             self._populate_row(self._unsched_tbl, r, self._unsched_tags, item, row_num=True)
+            _desc_rec = item.get(_desc_tag)
+            if not isinstance(_desc_rec, dict):
+                continue
+            _full = str(_desc_rec.get("value") or "").strip()
+            if not _full:
+                continue
+            _cell = self._unsched_tbl.item(r, 1)
+            if _cell is None:
+                continue
+            _cell.setToolTip(_full)
+
+            # 1. Cached?
+            _short_rec = item.get(_short_tag)
+            _cached_short = (
+                str(_short_rec.get("value") or "").strip()
+                if isinstance(_short_rec, dict) else ""
+            )
+            if _cached_short:
+                _display = _cached_short
+            elif len(_full) <= 30:
+                _display = _full
+            elif _abbreviate is not None:
+                try:
+                    _display = _abbreviate(_full, max_chars=30) or _full
+                except Exception:  # noqa: BLE001
+                    _display = _full
+                # Persist for next time. Defer the emit one event-loop
+                # tick because this refresh runs during the form's
+                # __init__, before the host has connected the
+                # field_changed signal. Without the defer the emit is
+                # dropped and state.json never gets the cached value
+                # — the API gets re-called on every GUI restart.
+                # Default-arg binding captures loop variables by value
+                # so each row's deferred callback fires with its own
+                # row index and short text (not the loop's last
+                # iteration values).
+                if _display and _display != _full:
+                    from PySide6.QtCore import QTimer
+                    QTimer.singleShot(
+                        0,
+                        lambda _r=r, _v=_display, _t=_short_tag, _g=self.UNSCHED_GROUP:
+                            self.field_changed.emit(f"__rep:{_g}:{_r}:{_t}", _v),
+                    )
+            else:
+                _display = _full
+
+            if _display != _cell.text():
+                _prev_block = getattr(self._unsched_tbl, "_iga_block", False)
+                self._unsched_tbl._iga_block = True
+                _cell.setText(_display)
+                self._unsched_tbl._iga_block = _prev_block
+        # Canonical currency display for Unscheduled: col 2 = Per-Item
+        # Max, col 3 = Total Limit. (row_num=True offsets data cols by 1.)
+        _reformat_currency_cells(self._unsched_tbl, [2, 3])
         self._autofit_columns(self._unsched_tbl)
         self._refresh_ai_table(state)
         self._refresh_forms_table(state)
         self._refresh_cov_table(state)
+        # Canonical currency display for the IM Additional Coverages
+        # table: col 1 = Each Claim, col 2 = Aggregate, col 3 =
+        # Deductible. (_add_cov_table doesn't use row_num.)
+        if hasattr(self, "_add_cov_tbl"):
+            _reformat_currency_cells(self._add_cov_tbl, [1, 2, 3])
 
 
 class WorkersCompForm(SectionFormBase):

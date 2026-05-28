@@ -340,6 +340,24 @@ def launch_with_persistent_context(
     cleanup_user_data_dir_lock(user_data_dir)
     user_data_dir.mkdir(parents=True, exist_ok=True)
 
+    # Delete Chromium session marker files so it never shows the
+    # "Restore pages? Chromium didn't shut down correctly." prompt.
+    # These files are recreated on every clean launch; deleting them
+    # before launch is safe and is the most reliable suppression method
+    # (the --disable-restore-session-state flag is unreliable in practice).
+    _session_files = [
+        "Default/Current Session",
+        "Default/Current Tabs",
+        "Default/Last Session",
+        "Default/Last Tabs",
+    ]
+    for _sf in _session_files:
+        _p = user_data_dir / _sf
+        try:
+            _p.unlink(missing_ok=True)
+        except OSError:
+            pass
+
     # Lazy import - keeps unit tests free of Playwright at import time.
     try:
         from playwright.sync_api import sync_playwright
@@ -359,6 +377,7 @@ def launch_with_persistent_context(
             user_data_dir=str(user_data_dir),
             headless=not headed,
             args=chromium_args or None,
+            viewport=None,
         )
     except Exception as exc:  # noqa: BLE001 - wrap any launch failure
         # Surface Playwright's "user data dir already in use" as the typed
@@ -378,6 +397,24 @@ def launch_with_persistent_context(
         except Exception:  # noqa: BLE001 - best-effort cleanup
             pass
         raise EpicSessionError(f"Failed to launch persistent context: {msg}") from exc
+
+    # Clear Playwright's viewport override so EPIC fills the Chrome window naturally.
+    # Playwright sets Emulation.setDeviceMetricsOverride during context init even
+    # with viewport=None; calling clearDeviceMetricsOverride resets it so the page
+    # uses the real window size (equivalent to toggling DevTools device toolbar off).
+    def _clear_viewport(page: object) -> None:
+        try:
+            cdp = context.new_cdp_session(page)  # type: ignore[arg-type]
+            cdp.send("Emulation.clearDeviceMetricsOverride", {})
+            cdp.detach()
+        except Exception:  # noqa: BLE001 - best-effort; non-fatal
+            pass
+
+    if headed:
+        for page in context.pages:
+            _clear_viewport(page)
+        # Also clear for any tabs opened after launch (e.g. EPIC opens a new tab).
+        context.on("page", _clear_viewport)
 
     # Stash the playwright handle on the context so `enter` can call
     # `pw.stop()` on session end. Use a private attribute name.

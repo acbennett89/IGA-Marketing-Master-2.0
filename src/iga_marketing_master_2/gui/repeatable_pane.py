@@ -16,6 +16,7 @@ from collections.abc import Callable
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QHBoxLayout,
     QListWidget,
     QListWidgetItem,
@@ -91,6 +92,10 @@ class RepeatablePane(QWidget):
     conflict_clicked = Signal(str)
     item_added = Signal()
     item_deleted = Signal(int)
+    # Emitted when the operator deletes 2+ items at once via multi-select.
+    # Indices are passed in ascending order; the receiver MUST delete in
+    # descending order so earlier indices remain valid as later ones are removed.
+    items_deleted = Signal(list)
     commit_requested = Signal(str, int, str, object)
     focus_changed = Signal(str, int, str)  # group, item_index, domain_tag
 
@@ -144,6 +149,10 @@ class RepeatablePane(QWidget):
         left_layout.setContentsMargins(4, 4, 4, 4)
 
         self._list_widget = QListWidget(left)
+        # ExtendedSelection lets the operator Ctrl/Shift-click to select multiple
+        # rows for bulk delete.  Single-click still selects one (drives the
+        # detail form on the right).
+        self._list_widget.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self._list_widget.currentRowChanged.connect(self._on_row_changed)
         left_layout.addWidget(self._list_widget, 1)
 
@@ -224,10 +233,22 @@ class RepeatablePane(QWidget):
         self.item_added.emit()
 
     def _on_delete(self) -> None:
-        idx = self._list_widget.currentRow()
-        if idx < 0:
+        # Gather every selected row (ExtendedSelection allows Ctrl/Shift-click
+        # for multi-select).  Fall back to the current row for the legacy
+        # single-row case so behavior is unchanged when nothing is highlighted.
+        indices = sorted({m.row() for m in self._list_widget.selectionModel().selectedRows()})
+        if not indices:
+            idx = self._list_widget.currentRow()
+            if idx < 0:
+                return
+            self.item_deleted.emit(idx)
             return
-        self.item_deleted.emit(idx)
+        if len(indices) == 1:
+            self.item_deleted.emit(indices[0])
+            return
+        # 2+ selected → emit the batch signal so the host can prompt once and
+        # delete the whole set in a single state update.
+        self.items_deleted.emit(indices)
 
     def _on_commit(self, domain_tag: str, value: object) -> None:
         idx = self._list_widget.currentRow()

@@ -223,6 +223,12 @@ class FieldRecord:
     history: list[HistoryEntry] = field(default_factory=list)
     needs_review: bool = False
     model_used: str | None = None
+    # Set by the Client/NamedInsured reconciliation popup when the operator
+    # explicitly resolves a conflict. Future merges should leave this value
+    # alone and surface disagreements via the review popup instead of silently
+    # overwriting. Default False keeps backwards compatibility with old state
+    # files that don't carry this key.
+    pinned: bool = False
 
 
 # RepeatableItem is a dict[domain_tag -> FieldRecord]. Aliased for clarity.
@@ -253,6 +259,57 @@ class PendingExtraction:
     pdf_paths: list[str]
     completed_pdf_basenames: list[str] = field(default_factory=list)
     notes: str | None = None
+
+
+@dataclass(slots=True, kw_only=True)
+class Insured:
+    """Operator-typed Insured details surfaced on the Client page.
+
+    Persisted independently from extracted ``state.fields`` because these
+    values originate from the operator (or pre-existing EPIC records),
+    not from PDF extraction. ``lookup_code`` is the EPIC account
+    identifier used by the Account Locate flow — empty until the account
+    has been created in EPIC.
+    """
+
+    lookup_code: str = ""
+    named_insured: str = ""
+    fein: str = ""
+    business_type: str = ""            # EPIC Business Type (contact Business tab)
+    # New (2026-05-22) — feed the EPIC Add-Account form.
+    client_format: str = "BUSINESS"   # BUSINESS | INDIVIDUAL
+    agency: str = ""                   # "IGA" | "VA"  (empty until operator picks)
+    branch: str = ""                   # branch code; valid set depends on agency
+    street_address: str = ""           # replaces legacy single-line mailing_address
+    city: str = ""
+    state: str = ""
+    zip_code: str = ""
+    physical_address: str = ""         # single line, kept for marketing use
+    business_phone: str = ""
+    website: str = ""
+    naics: str = ""
+    sic: str = ""
+    # Legacy single-line — retained on read for backwards compatibility but
+    # no longer surfaced in the GUI. ``_insured_from_dict`` migrates this into
+    # ``street_address`` when the new field is empty.
+    mailing_address: str = ""
+    # Field-name list set by the Client/NamedInsured reconciliation popup
+    # when the operator explicitly picks a value. Each entry is an attribute
+    # name on this dataclass ("fein", "business_type", "street_address", …).
+    # Future extractions that propose a different value for a canon field
+    # surface a review popup rather than silently overwriting.
+    canon_fields: list[str] = field(default_factory=list)
+
+
+@dataclass(slots=True, kw_only=True)
+class Contact:
+    """One person on the Client page's Contacts table."""
+
+    first_name: str = ""
+    last_name: str = ""
+    title: str = ""
+    email: str = ""
+    phone: str = ""
 
 
 @dataclass(slots=True, kw_only=True)
@@ -321,6 +378,11 @@ class State:
     # Entry time. Persisted so subsequent Begin Entry clicks default to
     # the same picks (operator typically just re-confirms).
     submission_setup: SubmissionSetup | None = None
+    # Operator-typed Insured details + Contacts surfaced on the Client page.
+    # ``insured.lookup_code`` doubles as the EPIC account identifier used
+    # by the Account Locate flow.
+    insured: Insured = field(default_factory=Insured)
+    contacts: list[Contact] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -402,6 +464,43 @@ def _norm(v: PrimitiveValue) -> str:
         return ""
     s = str(v).strip().casefold()
     return re.sub(r"\s+", " ", s)
+
+
+# Business-entity name normalization shared by:
+#   1. ``_account_named_insured_key`` (extraction merge dedup),
+#   2. ``reconcile.normalize_entity_name`` (Client/NI reconciliation match).
+# Keeping both behind the same implementation prevents the bug where
+# "Acme, LLC" and "Acme LLC" hash to different natural keys and extraction
+# appends a duplicate row that reconciliation can't see.
+_ENTITY_DOT_RE = re.compile(r"\.")
+_ENTITY_PUNCT_RE = re.compile(r"[,\-_/\\()&'\"]")
+_ENTITY_WS_RE = re.compile(r"\s+")
+_ENTITY_SUFFIXES: frozenset[str] = frozenset({
+    "inc", "incorporated", "llc", "ltd", "corp", "corporation",
+    "co", "company", "lp", "llp", "pllc", "pc",
+})
+
+
+def normalize_entity_name(s: str | None) -> str:
+    """Lower / dot-collapse / punct-to-space / strip-trailing-suffix.
+
+    Examples — all collapse to ``"acme"``:
+      ``"Acme, LLC"`` · ``"Acme L.L.C."`` · ``"ACME LLC"`` · ``"Acme Inc."``
+    Embedded words are left alone: ``"Acme Corp Holdings"`` →
+    ``"acme corp holdings"`` (only the *trailing* business suffix is stripped).
+    """
+    if not s:
+        return ""
+    out = str(s).strip().lower()
+    out = _ENTITY_DOT_RE.sub("", out)
+    out = _ENTITY_PUNCT_RE.sub(" ", out)
+    out = _ENTITY_WS_RE.sub(" ", out).strip()
+    if not out:
+        return ""
+    parts = out.split(" ")
+    if len(parts) > 1 and parts[-1] in _ENTITY_SUFFIXES:
+        parts = parts[:-1]
+    return " ".join(parts).strip()
 
 
 def _norm_vin(v: PrimitiveValue) -> str:
@@ -591,9 +690,12 @@ def _location_key_actual(item: RepeatableItem) -> str | None:
 
 
 def _account_named_insured_key(item: RepeatableItem) -> str | None:
+    # Use the shared business-entity normalization so "Acme, LLC", "Acme LLC",
+    # and "Acme L.L.C." all dedup into one row. Mirrors the rule used by
+    # reconcile.find_matching_ni_row.
     name = (
-        _norm(_value_of(item, "account.named_insured.name"))
-        or _norm(_value_of(item, "account.named_insured.fni_name"))
+        normalize_entity_name(_value_of(item, "account.named_insured.name"))
+        or normalize_entity_name(_value_of(item, "account.named_insured.fni_name"))
     )
     return f"{name}|" if name else None
 
@@ -807,6 +909,8 @@ def _state_to_dict(state: State) -> dict[str, Any]:
             if state.submission_setup is not None
             else None
         ),
+        "insured": _dc_to_dict(state.insured),
+        "contacts": [_dc_to_dict(c) for c in state.contacts],
     }
 
 
@@ -846,6 +950,7 @@ def _field_record_from_dict(d: dict[str, Any]) -> FieldRecord:
         history=[_history_from_dict(h) for h in d.get("history", [])],
         needs_review=bool(d.get("needs_review", False)),
         model_used=d.get("model_used"),
+        pinned=bool(d.get("pinned", False)),
     )
 
 
@@ -882,6 +987,53 @@ def _pending_extraction_from_dict(
         pdf_paths=list(d.get("pdf_paths", [])),
         completed_pdf_basenames=list(d.get("completed_pdf_basenames", [])),
         notes=d.get("notes"),
+    )
+
+
+def _insured_from_dict(d: dict[str, Any] | None, *, legacy_lookup_code: str = "") -> Insured:
+    if not isinstance(d, dict):
+        # Pre-insured-block state: synthesize an Insured carrying only the
+        # legacy top-level lookup_code (if present).
+        return Insured(lookup_code=legacy_lookup_code)
+    # Legacy migration: if state still has the single-line mailing_address
+    # but no street_address, dump it into street_address so first load
+    # doesn't drop data on the floor.
+    legacy_mailing = str(d.get("mailing_address") or "")
+    street_addr = str(d.get("street_address") or "") or legacy_mailing
+
+    fmt = str(d.get("client_format") or "BUSINESS").upper()
+    if fmt not in ("BUSINESS", "INDIVIDUAL"):
+        fmt = "BUSINESS"
+
+    return Insured(
+        lookup_code=str(d.get("lookup_code") or legacy_lookup_code or ""),
+        named_insured=str(d.get("named_insured") or ""),
+        fein=str(d.get("fein") or ""),
+        business_type=str(d.get("business_type") or ""),
+        client_format=fmt,
+        agency=str(d.get("agency") or ""),
+        branch=str(d.get("branch") or ""),
+        street_address=street_addr,
+        city=str(d.get("city") or ""),
+        state=str(d.get("state") or ""),
+        zip_code=str(d.get("zip_code") or ""),
+        mailing_address=legacy_mailing,
+        physical_address=str(d.get("physical_address") or ""),
+        business_phone=str(d.get("business_phone") or ""),
+        website=str(d.get("website") or ""),
+        naics=str(d.get("naics") or ""),
+        sic=str(d.get("sic") or ""),
+        canon_fields=[str(f) for f in (d.get("canon_fields") or [])],
+    )
+
+
+def _contact_from_dict(d: dict[str, Any]) -> Contact:
+    return Contact(
+        first_name=str(d.get("first_name") or ""),
+        last_name=str(d.get("last_name") or ""),
+        title=str(d.get("title") or ""),
+        email=str(d.get("email") or ""),
+        phone=str(d.get("phone") or ""),
     )
 
 
@@ -973,6 +1125,15 @@ def _state_from_dict(raw: dict[str, Any], *, client_fallback: str) -> State:
             dict(p) for p in raw.get("pending_domain_tag_proposals", [])
         ],
         submission_setup=_submission_setup_from_dict(raw.get("submission_setup")),
+        insured=_insured_from_dict(
+            raw.get("insured"),
+            legacy_lookup_code=str(raw.get("lookup_code") or ""),
+        ),
+        contacts=[
+            _contact_from_dict(c)
+            for c in raw.get("contacts", [])
+            if isinstance(c, dict)
+        ],
     )
 
 
@@ -1516,6 +1677,16 @@ def _merge_singleton(
         return
 
     if detection == "conflict":
+        # If the operator pinned this value via the Client/NamedInsured
+        # reconciliation popup, preserve it — extraction can't silently
+        # override an operator-confirmed value. Record the proposed value
+        # as a conflict candidate so the post-extraction reconciliation
+        # popup can surface the disagreement.
+        if rec.pinned:
+            rec.conflicts.append(_make_conflict_candidate(r))
+            rec.needs_review = True
+            report.conflicts_added += 1
+            return
         # New value wins on confidence — promote it to canonical and demote
         # the old value to a conflict candidate so the operator can flip
         # back via the GUI's conflict modal if Claude was wrong.
@@ -1596,6 +1767,15 @@ def _merge_repeatable_item(
                 )
             )
             report.fields_updated += 1
+        return
+
+    # Operator-pinned values (from the Client/NamedInsured reconciliation
+    # popup) are never silently overwritten by extraction. Treat the new
+    # candidate as a disagreement to surface via post-extraction reconciliation.
+    if rec.pinned:
+        rec.conflicts.append(_make_conflict_candidate(r))
+        rec.needs_review = True
+        report.conflicts_added += 1
         return
 
     if r.confidence > rec.confidence:

@@ -37,18 +37,26 @@ QFrame#DropZone:hover {
     border-color: #3b82f6;
     background: #eff6ff;
 }
+/* Labels inside the drop zone need transparent backgrounds so they
+   inherit the DropZone's #f8fafc fill (and the #eff6ff hover state).
+   Without this, Qt's default style paints each label with the system
+   window color (white on Windows), leaving stark white plates on the
+   pale drop-zone background. */
 QLabel#DropIcon {
     font-size: 28px;
     color: #3b82f6;
+    background: transparent;
 }
 QLabel#DropMainText {
     font-size: 13px;
     font-weight: bold;
     color: #374151;
+    background: transparent;
 }
 QLabel#DropOrText {
     font-size: 11px;
     color: #9ca3af;
+    background: transparent;
 }
 QPushButton#BrowseBtn {
     background: #2563eb;
@@ -66,6 +74,7 @@ QPushButton#BrowseBtn:hover {
 QLabel#DropFormatNote {
     font-size: 10px;
     color: #9ca3af;
+    background: transparent;
 }
 QLabel#QueueLabel {
     font-size: 12px;

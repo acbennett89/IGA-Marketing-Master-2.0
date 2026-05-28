@@ -36,15 +36,11 @@ class ColumnSpec:
 # ---------------------------------------------------------------------------
 # Named Insureds tab
 # ---------------------------------------------------------------------------
-# Per Q1 (Path B): all named insureds are rows in a single repeatable group
-# `account.named_insured.*`. The "primary" row is just the row with
-# `account.named_insured.name_type == "primary"`.
-#
-# All columns resolve via the OtherNamedInsureds screen, since EPIC stores
-# every named insured (primary included) on that one screen.
+# All named insureds are rows in a single repeatable group
+# `account.named_insured.*`. All columns resolve via the OtherNamedInsureds
+# screen, since EPIC stores every named insured on that one screen.
 NAMED_INSUREDS_COLUMNS: tuple[ColumnSpec, ...] = (
     ColumnSpec("Entity Name",      "Commercial AP > OtherNamedInsureds", "streName"),
-    ColumnSpec("Type",             "Commercial AP > OtherNamedInsureds", "cboNameType"),
     ColumnSpec("Business Type",    "Commercial AP > OtherNamedInsureds", "cboBusinessType"),
     ColumnSpec("FEIN / Tax ID",    "Commercial AP > OtherNamedInsureds", "streFEIN"),
     ColumnSpec("Address",          "Commercial AP > OtherNamedInsureds", "adeMailing-streetLine"),
